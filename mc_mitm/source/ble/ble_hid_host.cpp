@@ -14,14 +14,17 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "ble_hid_host.hpp"
+#include "ble_advertisement.hpp"
 #include "ble_events.hpp"
 #include "ble_gatt.hpp"
+#include "ble_pad.hpp"
 #include "ble_log.hpp"
 #include "ble_results.hpp"
 #include "../mcmitm_config.hpp"
 #include "../mcmitm_initialization.hpp"
 #include "../bluetooth_mitm/bluetooth/bluetooth_ble.hpp"
 #include "../controllers/controller_management.hpp"
+#include "../controllers/stadia_ble_controller.hpp"
 #include "../controllers/xbox_one_ble_controller.hpp"
 
 namespace ams::ble {
@@ -54,7 +57,15 @@ namespace ams::ble {
 
         /* The controller currently presented to the system */
         constinit os::SdkMutex g_controller_lock;
-        std::shared_ptr<controller::XboxOneBleController> g_controller;
+        std::shared_ptr<controller::SwitchController> g_controller;
+
+        // Which pad the controller above turned out to be, read under g_controller_lock together with it. The
+        // host never decodes a report: this only chooses which controller class a notification is handed to.
+        constinit pad::Kind g_kind = pad::Kind::None;
+
+        // Each presentation owns one endpoint identity, so a report is only ever accepted by the controller
+        // it was subscribed for (see StadiaGattInput)
+        constinit u64 g_endpoint_generation = 0;
 
         // Withdrawn from hid while the Controllers screen is open, as the screen does with every controller;
         // the link stays up and the controller comes back on LB+RB (any button once the screen is closed)
@@ -69,7 +80,38 @@ namespace ams::ble {
         constexpr s64 NeutralReportDelaysMs[NeutralReportCount] = { 0, 300, 1000, 2500 };
         constinit s64 g_neutral_due[NeutralReportCount] = {};
 
-        constexpr u8 NeutralReport[sizeof(controller::XboxOneInputReport0x01)] = { 0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80 };
+        constexpr u8 XboxNeutralReport[sizeof(controller::XboxOneInputReport0x01)] = { 0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80 };
+
+        // A pad reports nothing until something is touched, so the resting state has to come from the pad
+        // itself rather than from a composition: Stadia's is the first row of the captured reports.
+        const u8 *RestingReport(pad::Kind kind, size_t *out_size) {
+            switch (kind) {
+                case pad::Kind::Stadia:
+                    *out_size = sizeof(controller::StadiaBleNeutralReport);
+                    return controller::StadiaBleNeutralReport;
+                default:
+                    *out_size = sizeof(XboxNeutralReport);
+                    return XboxNeutralReport;
+            }
+        }
+
+        bool IsRestingReport(pad::Kind kind, const u8 *data, size_t size) {
+            size_t resting_size = 0;
+            const u8 *resting = RestingReport(kind, &resting_size);
+            return (size == resting_size) && (std::memcmp(data, resting, size) == 0);
+        }
+
+        // A notification arrives as the payload of one Report characteristic with the report id stripped off;
+        // the pad's own class knows what to do with it. Kept here rather than in a member for the same reason
+        // the resting report is: the host holds a SwitchController, the type it was attached as.
+        Result DeliverInput(const std::shared_ptr<controller::SwitchController> &controller, pad::Kind kind, const u8 *data, size_t size) {
+            switch (kind) {
+                case pad::Kind::Stadia:
+                    return std::static_pointer_cast<controller::StadiaBleController>(controller)->HandleInputReport(data, size);
+                default:
+                    return std::static_pointer_cast<controller::XboxOneBleController>(controller)->HandleInputReport(data, size);
+            }
+        }
 
         void ScheduleNeutralReports() {
             const s64 now = os::GetSystemTick().GetInt64Value();
@@ -80,7 +122,8 @@ namespace ams::ble {
         }
 
         void ServiceNeutralReports() {
-            std::shared_ptr<controller::XboxOneBleController> controller;
+            std::shared_ptr<controller::SwitchController> controller;
+            pad::Kind kind = pad::Kind::None;
             bool due = false;
             {
                 std::scoped_lock lk(g_controller_lock);
@@ -93,10 +136,13 @@ namespace ams::ble {
                 }
                 if (due && !g_parked) {
                     controller = g_controller;
+                    kind = g_kind;
                 }
             }
             if (controller) {
-                static_cast<void>(controller->HandleInputReport(NeutralReport, sizeof(NeutralReport)));
+                size_t resting_size = 0;
+                const u8 *resting = RestingReport(kind, &resting_size);
+                static_cast<void>(DeliverInput(controller, kind, resting, resting_size));
             }
         }
 
@@ -119,8 +165,17 @@ namespace ams::ble {
             return false;
         }
 
+        // Whether a report carries something a human did. The Xbox offsets are that pad's layout; a pad whose
+        // resting report is known is compared against it instead of against a guess.
+        bool ReportCarriesInput(pad::Kind kind, const u8 *data, size_t size) {
+            if (kind != pad::Kind::Xbox) {
+                return !IsRestingReport(kind, data, size);
+            }
+            return ReportHasAnyInput(data, size);
+        }
+
         void Unpark() {
-            std::shared_ptr<controller::XboxOneBleController> controller;
+            std::shared_ptr<controller::SwitchController> controller;
             {
                 std::scoped_lock lk(g_controller_lock);
                 if (!g_parked || !g_controller) {
@@ -134,45 +189,21 @@ namespace ams::ble {
             log::Write("controller presented to the system again");
         }
 
-        /* Advertisement parsing */
+        /* Advertisement parsing: btdrv hands over already-separated AD records, which the portable parser in
+           ble_advertisement.hpp turns into what is known about a device. An advertisement only decides whether
+           a device is worth connecting to; what it *is* gets settled from its attributes later, because the
+           Stadia and Xbox controllers advertise the same gamepad appearance. */
 
-        struct AdvertisementSummary {
-            char name[0x20];
-            bool has_appearance;
-            u16 appearance;
-        };
+        adv::Summary g_device_advertisement;    // the advertisement of the device being connected to
 
-        void ParseAdvertisements(const BtdrvBleAdvertisement *ad_list, u8 count, AdvertisementSummary *out) {
-            std::memset(out, 0, sizeof(*out));
+        void ParseAdvertisements(const BtdrvBleAdvertisement *ad_list, u8 count, adv::Summary *out) {
+            adv::Reset(out);
 
             count = std::min<u8>(count, 10);
             for (u8 i = 0; i < count; ++i) {
                 auto &ad = ad_list[i];
-                size_t len = std::min<size_t>(ad.size, sizeof(ad.data));
-
-                switch (ad.type) {
-                    case BtdrvAdType_ShortenedLocalName:
-                    case BtdrvAdType_CompleteLocalName: {
-                        size_t n = std::min(len, sizeof(out->name) - 1);
-                        std::memcpy(out->name, ad.data, n);
-                        out->name[n] = '\0';
-                        break;
-                    }
-                    case BtdrvAdType_Appearance:
-                        if (len >= 2) {
-                            out->has_appearance = true;
-                            out->appearance = ad.data[0] | (ad.data[1] << 8);
-                        }
-                        break;
-                    default:
-                        break;
-                }
+                adv::Feed(out, ad.type, ad.data, std::min<size_t>(ad.size, sizeof(ad.data)));
             }
-        }
-
-        // The name only travels in the scan response, which isn't always reported
-        bool IsXboxController(const AdvertisementSummary &summary) {
-            return (std::strncmp(summary.name, "Xbox", 4) == 0) || (summary.has_appearance && (summary.appearance == AppearanceGamepad));
         }
 
         /* LE HID event stream: notifications from services registered with RegisterGattHidDataPath, and the results
@@ -206,23 +237,28 @@ namespace ams::ble {
 
                 if ((notify.type == GattNotifyType_Notification) && IsUuid16(notify.char_uuid, GattCharReport)) {
                     const size_t size = std::min<size_t>(notify.size, sizeof(notify.data));
-                    std::shared_ptr<controller::XboxOneBleController> controller;
+                    std::shared_ptr<controller::SwitchController> controller;
+                    pad::Kind kind;
                     bool parked;
                     {
                         std::scoped_lock lk(g_controller_lock);
                         controller = g_controller;
+                        kind = g_kind;
                         parked = g_parked;
                     }
                     if (parked) {
                         // What brings a controller back on the Controllers screen is L+R; afterwards any button does
-                        if (ReportHasLbRb(notify.data, size) || (!events::IsPairingWindowOpen() && ReportHasAnyInput(notify.data, size))) {
+                        if (ReportHasLbRb(notify.data, size) || (!events::IsPairingWindowOpen() && ReportCarriesInput(kind, notify.data, size))) {
                             Unpark();
                         } else {
                             continue;
                         }
                     }
                     if (controller) {
-                        static_cast<void>(controller->HandleInputReport(notify.data, size));
+                        const Result rc = DeliverInput(controller, kind, notify.data, size);
+                        if (R_FAILED(rc)) {
+                            log::Write("report of %zu bytes refused: rc=0x%x", size, rc.GetValue());
+                        }
                     }
                 } else {
                     // The value of a characteristic we asked to read arrives here as well
@@ -512,9 +548,13 @@ namespace ams::ble {
                 if (only) {
                     return AddressEqual(r.info.scan_result.address, *only);
                 }
-                AdvertisementSummary summary;
+                adv::Summary summary;
                 ParseAdvertisements(r.info.scan_result.ad_list, r.info.scan_result.count, &summary);
-                return IsXboxController(summary);
+                if (pad::IsWorthConnecting(summary)) {
+                    g_device_advertisement = summary;
+                    return true;
+                }
+                return false;
             });
 
             static_cast<void>(btdrvStopBleScan());
@@ -589,6 +629,11 @@ namespace ams::ble {
             if (!events::TakeAdoptedConnection(out_address, out_conn_id)) {
                 return false;
             }
+
+            // A link that came up without being asked for was never seen in an advertisement, so nothing is
+            // known about it from one. Left unset, the fallback rule treats it as it always did.
+            adv::Reset(&g_device_advertisement);
+
             log::Write("controller connected on its own, conn_id=%u", *out_conn_id);
             return true;
         }
@@ -626,15 +671,38 @@ namespace ams::ble {
 
         /* Presenting the controller to the system */
 
-        void Present(u32 conn_id, const bluetooth::Address &address, const gatt::HidService &hid) {
-            if (!hid.has_output_report) {
-                log::Write("no output Report characteristic, rumble unavailable");
+        // False if the pad could not be made to accept input, in which case nothing was attached
+        bool Present(u32 conn_id, const bluetooth::Address &address, const gatt::HidService &hid, const pad::Policy &policy) {
+            const bluetooth::hogp::Endpoint endpoint {
+                .generation = ++g_endpoint_generation,
+                .connection = conn_id,
+                .service = GattServiceHid,
+                .characteristic = GattCharReport,
+            };
+
+            std::shared_ptr<controller::SwitchController> controller;
+            if (policy.kind == pad::Kind::Stadia) {
+                if (!hid.has_output_report) {
+                    log::Write("no output Report characteristic, and nothing is written to a Stadia controller anyway");
+                }
+
+                auto stadia = std::make_shared<controller::StadiaBleController>(address, endpoint, policy.input_report_id, policy.input_report_size);
+                if (!stadia->BindInput()) {
+                    log::Write("could not bind input to the discovered report endpoint, nothing presented");
+                    return false;
+                }
+                controller = stadia;
+            } else {
+                if (!hid.has_output_report) {
+                    log::Write("no output Report characteristic, rumble unavailable");
+                }
+                controller = std::make_shared<controller::XboxOneBleController>(address, conn_id, hid.service.id, hid.service.is_primary, hid.output_report.id);
             }
 
-            auto controller = std::make_shared<controller::XboxOneBleController>(address, conn_id, hid.service.id, hid.service.is_primary, hid.output_report.id);
             {
                 std::scoped_lock lk(g_controller_lock);
                 g_controller = controller;
+                g_kind = policy.kind;
                 g_parked = false;
                 g_present_tick = os::GetSystemTick().GetInt64Value();
             }
@@ -647,16 +715,22 @@ namespace ams::ble {
             ScheduleNeutralReports();
             ServiceNeutralReports();
 
-            log::Write("controller presented to the system");
+            if (policy.identified) {
+                log::Write("%s controller presented to the system", pad::Name(policy.kind));
+            } else {
+                log::Write("controller presented to the system, assumed to be an Xbox pad");
+            }
+            return true;
         }
 
         void Dismiss(const bluetooth::Address &address) {
-            std::shared_ptr<controller::XboxOneBleController> controller;
+            std::shared_ptr<controller::SwitchController> controller;
             bool parked;
             {
                 std::scoped_lock lk(g_controller_lock);
                 controller = std::move(g_controller);
                 g_controller = nullptr;
+                g_kind = pad::Kind::None;
                 parked = g_parked;
                 g_parked = false;
                 for (auto &due : g_neutral_due) {
@@ -801,19 +875,62 @@ namespace ams::ble {
                     continue;
                 }
 
-                // Ask the device what its reports are before deciding what it is. Nothing is done with the
-                // answer yet beyond logging it; see the pad kind dispatch that follows.
+                // What the device says about its own reports, asked before anything is presented. A pad that
+                // cannot be placed is dropped rather than driven with the nearest known layout: reports
+                // decoded at the wrong offset reach the system as garbage input, which is worse usefully than
+                // a controller that plainly refuses to work.
                 gatt::ReportFacts facts;
-                if (R_FAILED(gatt::Describe(conn_id, hid, &facts))) {
-                    log::Write("could not read the device's report map");
-                    gatt::Dump("report map unavailable");
+                const bool have_facts = R_SUCCEEDED(gatt::Describe(conn_id, hid, &facts));
+
+                auto policy = pad::PolicyFor(pad::Kind::None);
+                if (have_facts) {
+                    const pad::Fingerprint fingerprint {
+                        .input_report_id = facts.input_report_id,
+                        .input_report_size = facts.input_report_size,
+                        .output_report_id = facts.output_report_id,
+                        .output_report_size = facts.output_report_size,
+                        .has_protocol_mode = facts.has_protocol_mode,
+                        .has_hid_control_point = facts.has_hid_control_point,
+                        .name_says_xbox = adv::NameContains(g_device_advertisement, "Xbox"),
+                        .name_says_stadia = adv::NameContains(g_device_advertisement, "Stadia"),
+                    };
+
+                    policy = pad::PolicyFor(pad::Identify(fingerprint));
+                    if (policy.kind != pad::Kind::None) {
+                        // The device described itself, so use what it said rather than the table's numbers
+                        policy.input_report_id = facts.input_report_id;
+                        policy.input_report_size = facts.input_report_size;
+                    } else {
+                        log::Write("no pad matched input report id=0x%02x size=%u, output id=0x%02x size=%u",
+                            facts.input_report_id, facts.input_report_size, facts.output_report_id, facts.output_report_size);
+                    }
                 } else {
-                    log::Write("report map: input id=0x%02x size=%u, output id=0x%02x size=%u, protocol mode=%d, control point=%d",
-                        facts.input_report_id, facts.input_report_size, facts.output_report_id, facts.output_report_size,
-                        facts.has_protocol_mode ? 1 : 0, facts.has_hid_control_point ? 1 : 0);
+                    log::Write("could not read the device's report map");
                 }
 
-                Present(conn_id, address, hid);
+                if (policy.kind == pad::Kind::None) {
+                    /*
+                     * Fall back on the rule this module had before it read report maps - anything that looked
+                     * like a gamepad was an Xbox controller - but only for a device that is not itself claiming
+                     * to be a HID device, since such a device has told us enough to know we do not recognise
+                     * it. The assumption is logged as an assumption.
+                     */
+                    policy = pad::LegacyPolicy(g_device_advertisement);
+                    if (policy.kind == pad::Kind::None) {
+                        log::Write("nothing presented: this device is not a pad this module knows how to decode");
+                        gatt::Dump("unrecognised device");
+                        Disconnect();
+                        os::SleepThread(TimeSpan::FromSeconds(1));
+                        continue;
+                    }
+                    gatt::Dump("assumed pad");
+                }
+
+                if (!Present(conn_id, address, hid, policy)) {
+                    Disconnect();
+                    os::SleepThread(TimeSpan::FromSeconds(1));
+                    continue;
+                }
                 RunConnected(conn_id);
 
                 // Nothing beyond the teardown is asked of the stack once the link is gone: removing the bond and
@@ -879,7 +996,7 @@ namespace ams::ble {
             return;
         }
 
-        std::shared_ptr<controller::XboxOneBleController> controller;
+        std::shared_ptr<controller::SwitchController> controller;
         {
             std::scoped_lock lk(g_controller_lock);
             if (!g_controller || g_parked || ((now - os::Tick(g_present_tick)).ToTimeSpan() < NewSessionGap)) {

@@ -54,8 +54,8 @@ namespace ams::ble::pad {
     /* From the link once it is up: what the device actually exposes. */
 
     struct Fingerprint {
-        std::uint8_t input_report_id;     // 0 = the notifying Report characteristic had no usable reference
-        std::uint8_t input_report_size;   // notification payload size, without the report id; 0 = unknown
+        std::uint8_t input_report_id;     // from the device's Report Map; 0 = it could not be read
+        std::uint8_t input_report_size;   // payload size without the report id; 0 = unknown
         std::uint8_t output_report_id;    // 0 = no writable Report characteristic
         std::uint8_t output_report_size;
         bool has_protocol_mode;           // 0x2A4E
@@ -76,6 +76,18 @@ namespace ams::ble::pad {
     // Stadia: input Report 0x03, 10 bytes (HID report descriptor and a macOS Bluetooth LE capture agree);
     // its writable Report is 0x05, 4 bytes, and no host has told us what it means yet.
     // Xbox: input Report 0x01, 16 bytes. Older LE firmwares have been seen a byte shorter, hence a range.
+    // For the log: an unfamiliar pad is only diagnosable afterwards if the log says what was looked at.
+    inline const char *Name(Kind kind) {
+        switch (kind) {
+            case Kind::Xbox:
+                return "Xbox";
+            case Kind::Stadia:
+                return "Stadia";
+            default:
+                return "unrecognised";
+        }
+    }
+
     inline Kind Identify(const Fingerprint &fingerprint) {
         if ((fingerprint.input_report_id == 0x03) && (fingerprint.input_report_size == 10)) {
             return Kind::Stadia;

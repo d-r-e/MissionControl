@@ -11,8 +11,9 @@
 namespace ams::controller {
 
     // Input translation only: BLE discovery/security and the virtual HID
-    // connection lifecycle must be established by the transport first.
-    class StadiaController final : public EmulatedSwitchController {
+    // connection lifecycle must be established by the transport first, which is
+    // what StadiaBleController does for a Bluetooth LE connection.
+    class StadiaController : public EmulatedSwitchController {
         public:
             static constexpr const HardwareID hardware_ids[] = {
                 {0x18d1, 0x9400}, // Google Stadia Controller, Bluetooth mode
