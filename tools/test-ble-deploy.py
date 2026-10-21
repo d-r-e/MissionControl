@@ -164,6 +164,173 @@ def test_restore_is_byte_identical(tmp):
     assert ini_text(sd) == INI_TEXT
 
 
+def load_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ble_deploy", str(TOOL))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class FailingCard:
+    """Wraps a card and fails the module write part way through, like a transfer that dies."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    def describe(self):
+        return self.inner.describe()
+
+    def write(self, rel, data):
+        if rel == str(MODULE):
+            self.inner.write(rel, data[: len(data) // 3])      # truncated, as a half-finished STOR leaves it
+            raise OSError("connection reset during STOR")
+        self.inner.write(rel, data)
+
+
+class FakeFtp:
+    """Enough ftplib for FtpCard, with the quirks the Switch server actually has: NLST answers with full
+    paths and only after a CWD, SIZE refuses directories and key files, MDTM is useless."""
+
+    def __init__(self, root):
+        self.root = root          # {posix path: bytes}
+        self.cwd = "/"
+        self.stored = []
+
+    def sendcmd(self, command):
+        if command.startswith("TYPE"):
+            return "200 Type set to I"
+        if command.startswith("CWD "):
+            target = command[4:].rstrip("/") or "/"
+            # the real server refuses CWD on a file, which is how the tool tells files from directories
+            if target != "/" and not any(p.startswith(target + "/") for p in self.root):
+                raise Exception("550 CWD failed")
+            self.cwd = target
+            return "250 Directory changed."
+        raise Exception("500 unimplemented")
+
+    def _child_names(self):
+        prefix = self.cwd.rstrip("/") + "/"
+        names, dirs = set(), set()
+        for path in self.root:
+            if not path.startswith(prefix):
+                continue
+            rest = path[len(prefix):]
+            if "/" in rest:
+                dirs.add(prefix + rest.split("/")[0])
+            else:
+                names.add(path)
+        return sorted(names | dirs)
+
+    def nlst(self, argument=""):
+        if argument:                      # the server answers nothing when given a path
+            return []
+        return self._child_names()
+
+    def size(self, path):
+        if path in self.root:
+            base = path.rsplit("/", 1)[-1]
+            if base.endswith(".keys"):
+                raise Exception("553 File name not allowed")
+            return len(self.root[path])
+        raise Exception("550 not a file")
+
+    def retrbinary(self, command, callback, blocksize):
+        path = command.split(" ", 1)[1]
+        callback(self.root[path])
+
+    def storbinary(self, command, handle, blocksize):
+        path = command.split(" ", 1)[1]
+        self.root[path] = handle.read()
+        self.stored.append(path)
+
+    def quit(self):
+        pass
+
+    def close(self):
+        pass
+
+
+def test_a_failed_write_leaves_a_way_back(tmp):
+    module = load_module()
+    sd = make_sd(tmp / "halfwrite")
+    card = FailingCard(module.LocalCard(sd))
+    build = write_build(tmp / "new.nsp")
+    backup = tmp / "b-half"
+    args = module.argparse.Namespace(module=str(build), ble="on", backup_dir=str(backup), restore=False,
+                                     expect_module=None, apply=True, force_card=False)
+    try:
+        module.run(card, args)
+        raise AssertionError("the failing write should have stopped the tool")
+    except OSError:
+        pass
+
+    receipt = json.loads((backup / "receipt.json").read_text())
+    assert receipt["replaced"][str(MODULE)]["sha256"] == hashlib.sha256(LIVE_MODULE).hexdigest()
+    assert receipt["state"] == "backed up, nothing written yet", receipt["state"]
+    assert (backup / str(MODULE).replace("/", "_")).read_bytes() == LIVE_MODULE
+    assert (sd / MODULE).read_bytes() != LIVE_MODULE          # the card really is damaged at this point
+
+    module.run(module.LocalCard(sd), module.argparse.Namespace(module=None, ble=None, backup_dir=str(backup),
+                                                              restore=True, expect_module=None, apply=True,
+                                                              force_card=False))
+    assert (sd / MODULE).read_bytes() == LIVE_MODULE
+
+
+def test_restore_is_bound_to_the_card_it_came_from(tmp):
+    module = load_module()
+    source = make_sd(tmp / "card-a")
+    other = make_sd(tmp / "card-b")
+    backup = tmp / "b-card"
+    module.run(module.LocalCard(source), module.argparse.Namespace(module=str(write_build(tmp / "n.nsp")),
+                                                                  ble="on", backup_dir=str(backup), restore=False,
+                                                                  expect_module=None, apply=True, force_card=False))
+    for force in (False,):
+        try:
+            module.run(module.LocalCard(other), module.argparse.Namespace(module=None, ble=None,
+                                                                         backup_dir=str(backup), restore=True,
+                                                                         expect_module=None, apply=True, force_card=force))
+            raise AssertionError("restoring card A's receipt onto card B must be refused")
+        except SystemExit as exc:
+            assert "another card" in str(exc) or str(exc).startswith("this receipt was taken from"), str(exc)
+    assert (other / MODULE).read_bytes() == LIVE_MODULE
+
+
+def test_ftp_transport_matches_the_real_server(tmp):
+    module = load_module()
+    tree = {
+        "/atmosphere/contents/010000000000bd00/exefs.nsp": LIVE_MODULE,
+        "/atmosphere/contents/010000000000bd00/._exefs.nsp": b"appledouble",
+        "/atmosphere/contents/010000000000bd00/mitm.lst": b"fs\n",
+        "/config/MissionControl/missioncontrol.ini": INI_TEXT.encode(),
+        "/switch/prod.keys": KEYS_BEFORE,
+        "/switch/hbmenu.nro": b"nro",
+    }
+    ftp = FakeFtp(tree)
+    card = module.FtpCard("switch.test", 5000, ftp=ftp)
+
+    found, unreadable = module.inventory(card)
+    assert str(MODULE) in found and str(INI) in found, sorted(found)
+    assert "switch/hbmenu.nro" in found
+    assert not [p for p in found if p.endswith(".keys") or "/._" in p], sorted(found)
+
+    keys_before = tree["/switch/prod.keys"]
+    build = write_build(tmp / "ftp.nsp")
+    backup = tmp / "b-ftp"
+    module.run(card, module.argparse.Namespace(module=str(build), ble="on", backup_dir=str(backup), restore=False,
+                                               expect_module=hashlib.sha256(LIVE_MODULE).hexdigest(), apply=True,
+                                               force_card=False))
+    assert tree["/atmosphere/contents/010000000000bd00/exefs.nsp"] == NEW_MODULE
+    assert b"enable=true" in tree["/config/MissionControl/missioncontrol.ini"]
+    assert tree["/switch/prod.keys"] == keys_before          # never read, never written
+    receipt = json.loads((backup / "receipt.json").read_text())
+    assert receipt["changed"] == sorted([str(MODULE), str(INI)]), receipt["changed"]
+    assert (backup / str(MODULE).replace("/", "_")).read_bytes() == LIVE_MODULE
+
+
 def main():
     tests = [value for name, value in sorted(globals().items()) if name.startswith("test_")]
     for test in tests:
