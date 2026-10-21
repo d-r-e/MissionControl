@@ -38,6 +38,11 @@ trap 'rm -rf "$build"' EXIT
     "$root/tests/hogp_report_tests.cpp" -o "$build/hogp-report-tests"
 "$build/hogp-report-tests" "$root/tests/fixtures/stadia_bluetooth_report_map.hex" \
     "$root/tests/fixtures/stadia_bluetooth_reports.txt"
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
+    -fsanitize=address,undefined -fno-omit-frame-pointer -g \
+    -I "$root/mc_mitm/source/ble" \
+    "$root/tests/ble_pad_tests.cpp" -o "$build/ble-pad-tests"
+"$build/ble-pad-tests"
 python3 "$root/tools/stadia-probe/prepare-target.py" --self-test
 # tools/check-stadia-scope.py guarded the module-side probe/trace instrumentation, which now
 # lives on branch diag/ble-probe and is intentionally absent from this branch.
