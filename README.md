@@ -42,6 +42,7 @@ Use controllers from other consoles natively on your Nintendo Switch via Bluetoo
 * __Microsoft Xbox Elite Wireless Controller Series 2__
 * __Microsoft Xbox Series X|S Controller__ (Bluetooth LE, see below)
 * __Microsoft Xbox Adaptive Controller__ (Bluetooth LE, see below)
+* __Google Stadia Controller__ (Bluetooth LE, see below)
 * __NVidia Shield Controller (2017 Model)__
 * __Ouya Controller__
 * __Gamestick Controller__
@@ -103,7 +104,7 @@ Controllers must first be paired with the console (see below) before they can be
 
 #### Bluetooth LE controllers (experimental)
 
-Xbox controllers on firmware 5.x or newer, including all Series X|S and Adaptive controllers, use Bluetooth Low Energy instead of classic Bluetooth. Support for these is disabled by default. To enable it, set `enable=true` in the `[ble]` section of `/config/MissionControl/missioncontrol.ini` and reboot. Mission Control then brings the console's BLE radio up about 20 seconds after boot (this briefly cycles Bluetooth, so any classic controller connected at that moment reconnects a couple of seconds later) and looks for a controller.
+Xbox controllers on firmware 5.x or newer, including all Series X|S and Adaptive controllers, use Bluetooth Low Energy instead of classic Bluetooth. The Google Stadia Controller uses it too. Support for these is disabled by default. To enable it, set `enable=true` in the `[ble]` section of `/config/MissionControl/missioncontrol.ini` and reboot. Mission Control then brings the console's BLE radio up about 20 seconds after boot (this briefly cycles Bluetooth, so any classic controller connected at that moment reconnects a couple of seconds later) and looks for a controller.
 
 To pair, open *Controllers → Change Grip/Order* and hold the controller's sync button until its logo flashes rapidly, the same way as for a Pro Controller. The controller shows up after about 15 seconds. The console's Bluetooth stack imposes one limitation: the controller does not remember the console, so it has to be paired again, from the same screen, every time it is switched on. The console's stack only supports LE legacy pairing, and these controllers keep a bond only from LE Secure Connections pairing; no Secure Connections support was found in the console's Bluetooth module, so this cannot be changed from Mission Control. For the same reason the controller cannot be reconnected by its Xbox button alone: with no console to reconnect to it switches itself off again.
 
@@ -114,6 +115,10 @@ With `auto_connect=true`, Mission Control remembers the last controller and keep
 A connected controller is disconnected when the console goes to sleep and switches itself off shortly after, so it does not wake the console. On the *Change Grip/Order* screen it behaves like any other controller: it is withdrawn when the screen opens and comes back on LB+RB (or on any button once the screen is closed).
 
 The `[ble]` section also offers a `log` option that writes what the BLE host is doing to `/config/MissionControl/ble.log`, which is useful when reporting problems.
+
+A controller is recognised by what it exposes once connected rather than by its name: Mission Control reads the device's own HID report map and presents it only if the reports it declares are ones it knows how to decode. A device that is not recognised is left alone and written to the log with the attributes it reported, rather than driven with the layout of the closest known controller, because reports decoded at the wrong offset reach the system as bogus input. If a controller you expect to work is refused, `log=true` and the log will show what it declared.
+
+The Stadia controller's writable report characteristic is not written to: what its output report means is not documented anywhere, and a pad that has just been paired is the wrong place to find out. It therefore has no rumble (the pad has no rumble motors on any of its transports) and nothing else is driven over that characteristic.
 
 Once connected, your controller's buttons are mapped as closely as possible to the physical layout of a Switch Pro Controller. This means that A/B and X/Y buttons will be swapped for controllers that use an Xbox style button layout rather than using what is printed on the button. The button combos `MINUS + DPAD_UP` and `MINUS + DPAD_DOWN` are provided for all controllers to function as an alternative for `CAPTURE` and `HOME` buttons in cases where there are not enough face buttons available. Button mappings can be changed from the official system menu at `System Settings->Controllers and Sensors->Change Button Mapping`.
 
