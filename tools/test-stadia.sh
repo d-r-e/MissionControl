@@ -82,5 +82,13 @@ python3 "$root/tools/test-stadia-launcher.py"
 "$build/connection-trace-client-tests"
 python3 "$root/tools/test-stadia-console.py"
 python3 "$root/tools/test-stadia-sd.py"
+
+# BLE pad identification (advertisement records, endpoint fingerprints) and the SD module swap
+ble_pad_bin="$(mktemp -d)/ble-pad"
+clang++ -std=c++20 -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined \
+    -I "$root/mc_mitm/source/ble" "$root/tests/ble_pad_tests.cpp" -o "$ble_pad_bin"
+"$ble_pad_bin"
+python3 "$root/tools/test-ble-deploy.py"
+
 bash -n "$root/tools/netload-stadia.sh"
 bash "$root/tools/stadia-host/test.sh"
