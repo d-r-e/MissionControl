@@ -17,6 +17,7 @@
 #include "ble_results.hpp"
 #include "ble_events.hpp"
 #include "ble_log.hpp"
+#include "../bluetooth_mitm/bluetooth/hid_report_layout.hpp"
 
 namespace ams::ble::gatt {
 
@@ -29,6 +30,24 @@ namespace ams::ble::gatt {
         constinit bool g_replace_pending = false;
         constinit bool g_discovery_complete = false;
         constinit bool g_rediscovered = false;
+
+        // Values from a characteristic read come back on the LE HID event stream as ClientNotify records, from
+        // the LE HID thread, while the host thread waits. One read is in flight at a time: the host already
+        // serialises its GATT requests, and two Report characteristics share a uuid, so a read answered out of
+        // order could not be matched to the characteristic it asked for anyway.
+        constexpr TimeSpan ReadTimeout = TimeSpan::FromSeconds(3);
+        constexpr size_t MaxReadSize = 0x200;   // the notification buffer the stack delivers values in
+
+        os::SdkMutex g_read_lock;
+        bool g_read_pending = false;
+        u16 g_read_uuid = 0;
+        bool g_read_answered = false;
+        bool g_read_failed = false;
+        size_t g_read_size = 0;
+        u8 g_read_data[MaxReadSize];
+
+        // Around 1.6 KiB: kept in module storage rather than on a stack, as hid_report_layout.hpp asks.
+        bluetooth::hogp::ReportLayout g_layout;
 
         const BtdrvGattAttribute *FindService(u16 uuid16) {
             for (size_t i = 0; i < g_table.count; ++i) {
@@ -56,6 +75,17 @@ namespace ams::ble::gatt {
                 }
             }
             return best;
+        }
+
+        const BtdrvGattAttribute *FindCharacteristicIn(const BtdrvGattAttribute &service, u16 uuid16) {
+            const size_t count = g_table.count;
+            for (size_t i = 0; i < count; ++i) {
+                auto &attr = g_table.attributes[i];
+                if ((attr.type == BtdrvGattAttributeType_Characteristic) && IsWithinService(attr, service) && IsUuid16(attr.id.uuid, uuid16)) {
+                    return &attr;
+                }
+            }
+            return nullptr;
         }
 
         const BtdrvGattAttribute *FindDescriptor(const BtdrvGattAttribute &characteristic, u16 uuid16) {
@@ -213,6 +243,139 @@ namespace ams::ble::gatt {
         }
 
         R_RETURN(result);
+    }
+
+    void OnClientNotify(const EventRecord &e) {
+        const auto &notify = e.info.client_notify;
+
+        std::scoped_lock lk(g_read_lock);
+        if (!g_read_pending || !IsUuid16(notify.char_uuid, g_read_uuid)) {
+            return;
+        }
+
+        // A record carrying neither a value nor an error is the acknowledgement of something else, not the
+        // answer to the read; keep waiting for the one that matters.
+        if ((notify.size == 0) && (notify.result == 0)) {
+            return;
+        }
+
+        g_read_answered = true;
+        g_read_failed = notify.result != 0;
+        g_read_size = std::min<size_t>(notify.size, sizeof(g_read_data));
+        std::memcpy(g_read_data, notify.data, g_read_size);
+        if (notify.result != 0) {
+            log::Write("read uuid=%04x answered with error %u", g_read_uuid, notify.result);
+        }
+    }
+
+    Result Read(u32 conn_id, const HidService &hid, u16 uuid16, void *out, size_t out_size, size_t *out_len) {
+        auto characteristic = FindCharacteristicIn(hid.service, uuid16);
+        R_UNLESS(characteristic, svc::ResultNotFound());
+
+        {
+            std::scoped_lock lk(g_read_lock);
+            g_read_pending = true;
+            g_read_uuid = uuid16;
+            g_read_answered = false;
+            g_read_failed = false;
+            g_read_size = 0;
+        }
+
+        const Result rc = btdrvReadGattCharacteristic(conn_id, hid.service.is_primary, &hid.service.id, &characteristic->id, BtdrvGattAuthReqType_NoMitm);
+        log::Write("btdrvReadGattCharacteristic uuid=%04x handle=0x%04x rc=0x%x", uuid16, characteristic->handle, rc.GetValue());
+        if (R_FAILED(rc)) {
+            std::scoped_lock lk(g_read_lock);
+            g_read_pending = false;
+            R_THROW(rc);
+        }
+
+        const auto deadline = os::GetSystemTick().ToTimeSpan() + ReadTimeout;
+        for (;;) {
+            {
+                std::scoped_lock lk(g_read_lock);
+                if (g_read_answered) {
+                    g_read_pending = false;
+                    R_UNLESS(!g_read_failed, svc::ResultNotFound());
+                    R_UNLESS(g_read_size > 0, svc::ResultNotFound());
+
+                    const size_t copied = std::min(g_read_size, out_size);
+                    std::memcpy(out, g_read_data, copied);
+                    if (out_len) {
+                        *out_len = copied;
+                    }
+                    R_SUCCEED();
+                }
+            }
+
+            if (os::GetSystemTick().ToTimeSpan() >= deadline) {
+                break;
+            }
+            os::SleepThread(TimeSpan::FromMilliSeconds(20));
+        }
+
+        {
+            std::scoped_lock lk(g_read_lock);
+            g_read_pending = false;
+        }
+        log::Write("read uuid=%04x timed out", uuid16);
+        R_THROW(svc::ResultTimedOut());
+    }
+
+    Result Describe(u32 conn_id, const HidService &hid, ReportFacts *out) {
+        *out = {};
+        out->has_protocol_mode = FindCharacteristicIn(hid.service, GattCharProtocolMode) != nullptr;
+        out->has_hid_control_point = FindCharacteristicIn(hid.service, GattCharHidControlPoint) != nullptr;
+
+        u8 map[MaxReadSize];
+        size_t map_size = 0;
+        R_TRY(Read(conn_id, hid, GattCharReportMap, map, sizeof(map), &map_size));
+
+        if (g_layout.Parse(map, map_size) != bluetooth::hogp::LayoutResult::Ok) {
+            log::Write("report map of %zu bytes could not be parsed", map_size);
+            R_THROW(svc::ResultNotSupported());
+        }
+        out->report_map_parsed = true;
+        log::Write("report map: %zu bytes, %s", map_size, g_layout.UsesReportIds() ? "uses report ids" : "no report ids");
+
+        u8 ids[8];
+        size_t count = g_layout.ListReports(bluetooth::hogp::ReportType::Input, ids, util::size(ids));
+        for (size_t i = 0; i < count; ++i) {
+            log::Write("  input  report id=0x%02x size=%zu", ids[i], g_layout.PayloadSize(ids[i], bluetooth::hogp::ReportType::Input));
+        }
+        if (count > 1) {
+            log::Write("  %zu input reports: taking the first, the notification size decides which one is meant", count);
+        }
+        if (count > 0) {
+            out->input_report_id = ids[0];
+            out->input_report_size = static_cast<u8>(std::min<size_t>(g_layout.PayloadSize(ids[0], bluetooth::hogp::ReportType::Input), 0xFF));
+        }
+
+        count = g_layout.ListReports(bluetooth::hogp::ReportType::Output, ids, util::size(ids));
+        for (size_t i = 0; i < count; ++i) {
+            log::Write("  output report id=0x%02x size=%zu", ids[i], g_layout.PayloadSize(ids[i], bluetooth::hogp::ReportType::Output));
+        }
+        if (hid.has_output_report && (count > 0)) {
+            out->output_report_id = ids[0];
+            out->output_report_size = static_cast<u8>(std::min<size_t>(g_layout.PayloadSize(ids[0], bluetooth::hogp::ReportType::Output), 0xFF));
+        }
+
+        R_SUCCEED();
+    }
+
+    void Dump(const char *why) {
+        if (!log::IsEnabled()) {
+            return;
+        }
+
+        log::Write("attributes (%s): %u entries", why, g_table.count);
+        const size_t count = g_table.count;
+        for (size_t i = 0; i < count; ++i) {
+            auto &attr = g_table.attributes[i];
+            char uuid[0x40];
+            FormatUuid(attr.id.uuid, uuid, sizeof(uuid));
+            log::Write("  [%02zu] handle=0x%04x end=0x%04x type=%u prop=0x%02x primary=%d uuid=%s",
+                i, attr.handle, attr.group_end_handle, attr.type, attr.property, attr.is_primary ? 1 : 0, uuid);
+        }
     }
 
 }

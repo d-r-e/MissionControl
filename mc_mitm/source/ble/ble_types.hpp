@@ -35,6 +35,7 @@ namespace ams::ble {
     constexpr u16 GattCharReportMap        = 0x2A4B;
     constexpr u16 GattCharReport           = 0x2A4D;
     constexpr u16 GattCharProtocolMode     = 0x2A4E;
+    constexpr u16 GattCharHidControlPoint  = 0x2A4C;
     constexpr u16 GattDescClientCharConfig = 0x2902;
     constexpr u16 GattDescReportReference  = 0x2908;
     constexpr u16 AppearanceGamepad        = 0x03C4;

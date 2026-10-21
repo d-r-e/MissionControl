@@ -52,4 +52,34 @@ namespace ams::ble::gatt {
     // when the link isn't encrypted; returns NotFound if the table holds no HID service.
     Result Subscribe(u32 conn_id, HidService *out);
 
+    /*
+     * What a device says its own reports are, read from its Report Map instead of assumed. Pads that are
+     * indistinguishable in an advertisement - the Stadia and Xbox controllers both advertise the gamepad
+     * appearance - differ here, which is where a pad should be recognised.
+     */
+    struct ReportFacts {
+        u8 input_report_id;       // 0 = the report map could not be read or parsed, or declared no input
+        u8 input_report_size;     // payload bytes without the report id, 0 = unknown
+        u8 output_report_id;      // 0 = no output report declared
+        u8 output_report_size;
+        bool report_map_parsed;
+        bool has_protocol_mode;       // 0x2A4E
+        bool has_hid_control_point;   // 0x2A4C
+    };
+
+    // Values read with btdrvReadGattCharacteristic come back on the LE HID event stream as ClientNotify
+    // records, which the LE HID thread hands here so a read can be waited for.
+    void OnClientNotify(const EventRecord &record);
+
+    // Reads one characteristic of the HID service, selected by 16-bit uuid.
+    Result Read(u32 conn_id, const HidService &hid, u16 uuid16, void *out, size_t out_size, size_t *out_len);
+
+    // Reads and parses the Report Map and notes which optional HID characteristics exist. The facts it
+    // returns are what identify a pad; when they cannot be obtained, the caller must not guess.
+    Result Describe(u32 conn_id, const HidService &hid, ReportFacts *out);
+
+    // Writes the attribute table to the log. With one controller on the bench this is the difference between
+    // a bug report and a guess about an unfamiliar device.
+    void Dump(const char *why);
+
 }

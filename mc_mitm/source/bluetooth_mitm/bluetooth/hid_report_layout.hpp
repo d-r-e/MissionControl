@@ -105,6 +105,18 @@ namespace ams::bluetooth::hogp {
 
         bool IsValid() const { return m_valid; }
         bool UsesReportIds() const { return m_valid && m_uses_ids; }
+        // Which ids a report map declares for a type. A device is told apart from another by these plus their
+        // sizes, which is why the list is exposed rather than only a lookup by a caller-guessed id.
+        std::size_t ListReports(ReportType type, std::uint8_t *ids, std::size_t max) const {
+            if (!m_valid || !ids) return 0;
+            const auto index = static_cast<unsigned>(type) - 1u;
+            std::size_t count = 0;
+            for (std::size_t id = 0; id < m_bits.size() && count < max; ++id) {
+                if (m_bits[id][index] != 0) ids[count++] = static_cast<std::uint8_t>(id);
+            }
+            return count;
+        }
+
         std::size_t PayloadSize(std::uint8_t id, ReportType type) const {
             const auto index = static_cast<unsigned>(type);
             if (!m_valid || index < 1 || index > 3) return 0;

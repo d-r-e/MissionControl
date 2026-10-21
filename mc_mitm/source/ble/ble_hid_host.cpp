@@ -225,6 +225,8 @@ namespace ams::ble {
                         static_cast<void>(controller->HandleInputReport(notify.data, size));
                     }
                 } else {
+                    // The value of a characteristic we asked to read arrives here as well
+                    gatt::OnClientNotify(g_le_hid_record);
                     events::NoteGattResult(notify.result);
                     events::Log(g_le_hid_record);
                 }
@@ -797,6 +799,18 @@ namespace ams::ble {
                     Disconnect();
                     os::SleepThread(TimeSpan::FromSeconds(1));
                     continue;
+                }
+
+                // Ask the device what its reports are before deciding what it is. Nothing is done with the
+                // answer yet beyond logging it; see the pad kind dispatch that follows.
+                gatt::ReportFacts facts;
+                if (R_FAILED(gatt::Describe(conn_id, hid, &facts))) {
+                    log::Write("could not read the device's report map");
+                    gatt::Dump("report map unavailable");
+                } else {
+                    log::Write("report map: input id=0x%02x size=%u, output id=0x%02x size=%u, protocol mode=%d, control point=%d",
+                        facts.input_report_id, facts.input_report_size, facts.output_report_id, facts.output_report_size,
+                        facts.has_protocol_mode ? 1 : 0, facts.has_hid_control_point ? 1 : 0);
                 }
 
                 Present(conn_id, address, hid);

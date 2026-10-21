@@ -170,6 +170,15 @@ void TestStadia(const char *map_path, const char *reports_path) {
     assert(layout.PayloadSize(3, ReportType::Input) == StadiaInputReport::PayloadSize);
     assert(layout.PayloadSize(5, ReportType::Output) == 4);
     assert(layout.PayloadSize(5, ReportType::Input) == 0);
+
+    // The declared reports, enumerable rather than only queryable by a guessed id: this is what a pad is
+    // recognised by once it is connected, so it has to be readable out of the device's own report map.
+    std::uint8_t input_ids[8] = {}, output_ids[8] = {};
+    assert(layout.ListReports(ReportType::Input, input_ids, 8) == 1);
+    assert(input_ids[0] == StadiaInputReport::ReportId);
+    assert(layout.ListReports(ReportType::Output, output_ids, 8) == 1);
+    assert(output_ids[0] == 0x05);
+    assert(layout.ListReports(ReportType::Feature, input_ids, 8) == 0);
     Session session;
     HidCatalog catalog{};
     catalog.service = 1; catalog.report_map = 2; catalog.count = 1;
