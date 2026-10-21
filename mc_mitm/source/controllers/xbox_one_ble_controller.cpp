@@ -29,16 +29,26 @@ namespace ams::controller {
         // Only the 9.0.0+ event layout is filled in; controllers only started using BLE in 2021
         R_UNLESS(hos::GetVersion() >= hos::Version_9_0_0, sf::ResultNotSupported());
 
+        // Report 0x01 is a fixed layout, and the parser reads every axis, trigger and direction out of it
+        // whatever the length says: a short notification would be answered with whatever the controller
+        // object happened to hold before - module heap the first time, the previous report's tail after
+        // that - and reach the system as stick and trigger positions nobody moved. Firmwares from before
+        // the layout settled have been seen one byte short, so the tail is completed with zeros (nothing
+        // pressed) instead of being guessed at or refused outright.
+        constexpr size_t ReportSize = sizeof(XboxOneInputReport0x01);
+        R_UNLESS((size + 1 >= ReportSize) && (size <= ReportSize), svc::ResultInvalidSize());
+
         auto &event = m_event_info.data_report.v9;
-        R_UNLESS(size + 1 <= sizeof(event.report.data), svc::ResultInvalidSize());
+        R_UNLESS(ReportSize + 1 <= sizeof(event.report.data), svc::ResultInvalidSize());
 
         event.res = 0;
         event.proto_mode = 0;
         event.addr = m_address;
         event.pad = 0;
-        event.report.size = size + 1;
+        event.report.size = ReportSize + 1;
         event.report.data[0] = InputReportId;
         std::memcpy(&event.report.data[1], data, size);
+        std::memset(&event.report.data[1 + size], 0, ReportSize - size);
 
         // The common input path is entered here: it parses the report, fills a Switch input report and
         // writes it to hid, exactly as for a classic Bluetooth connection.
@@ -77,6 +87,7 @@ namespace ams::controller {
 
     Result XboxOneBleController::WriteDataReport(const void *report_buffer, size_t size) {
         // Strip the report id: over GATT the characteristic itself identifies the report
+        R_UNLESS(m_has_output_report, sf::ResultNotSupported());
         R_UNLESS(size >= 1, svc::ResultInvalidSize());
         const u8 *data = static_cast<const u8 *>(report_buffer);
         R_RETURN(btdrvWriteGattCharacteristic(m_conn_id, m_service_primary, &m_service_id, &m_output_report_id, data + 1, size - 1, BtdrvGattAuthReqType_NoMitm, false));

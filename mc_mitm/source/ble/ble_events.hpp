@@ -74,6 +74,11 @@ namespace ams::ble::events {
     void SetRadioEnabled(bool enabled);
     bool IsRadioEnabled();
     void WaitRadioEnabled();
+
+    // Called once when the system is going away. The host must stop waiting for a radio that will not come
+    // back on, or joining its thread hangs the shutdown.
+    void BeginShutdown();
+    bool IsShuttingDown();
     bool TakeRadioCycled();
 
     // Last GATT client btm registered, usable as ours since btm never connects with it on a retail console

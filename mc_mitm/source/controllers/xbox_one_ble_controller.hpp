@@ -28,12 +28,13 @@ namespace ams::controller {
     class XboxOneBleController : public XboxOneController {
 
         public:
-            XboxOneBleController(bluetooth::Address address, u32 conn_id, const BtdrvGattId &service_id, bool service_primary, const BtdrvGattId &output_report_id)
+            XboxOneBleController(bluetooth::Address address, u32 conn_id, const BtdrvGattId &service_id, bool service_primary, const BtdrvGattId &output_report_id, bool has_output_report)
             : XboxOneController(address, {0x045e, 0x0b13})
             , m_conn_id(conn_id)
             , m_service_id(service_id)
             , m_service_primary(service_primary)
-            , m_output_report_id(output_report_id) { }
+            , m_output_report_id(output_report_id)
+            , m_has_output_report(has_output_report) { }
 
             // Payload of a notification from the HID input Report characteristic
             Result HandleInputReport(const u8 *data, size_t size);
@@ -48,6 +49,7 @@ namespace ams::controller {
             BtdrvGattId m_service_id;
             bool m_service_primary;
             BtdrvGattId m_output_report_id;
+            bool m_has_output_report;
 
             u8 m_last_rumble_strong = 0;
             u8 m_last_rumble_weak = 0;

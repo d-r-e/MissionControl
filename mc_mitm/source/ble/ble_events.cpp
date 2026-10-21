@@ -64,6 +64,7 @@ namespace ams::ble::events {
 
         constinit bool g_radio_enabled = false;
         constinit bool g_radio_cycled = false;
+        constinit bool g_shutting_down = false;
 
         constinit s64 g_inquiry_started_tick = 0;
         constinit bool g_bond_complete = false;
@@ -374,6 +375,19 @@ namespace ams::ble::events {
         return complete;
     }
 
+    void BeginShutdown() {
+        {
+            std::scoped_lock lk(g_lock);
+            g_shutting_down = true;
+        }
+        g_radio_event.Signal();
+    }
+
+    bool IsShuttingDown() {
+        std::scoped_lock lk(g_lock);
+        return g_shutting_down;
+    }
+
     void SetRadioEnabled(bool enabled) {
         std::scoped_lock lk(g_lock);
         if (enabled) {
@@ -384,7 +398,13 @@ namespace ams::ble::events {
             g_radio_event.Signal();
         } else {
             g_radio_enabled = false;
-            g_radio_event.Clear();
+            // During shutdown the event stays signalled: a host thread waiting on a radio that will not come
+            // back would never be joinable, and the shutdown would hang with it
+            if (g_shutting_down) {
+                g_radio_event.Signal();
+            } else {
+                g_radio_event.Clear();
+            }
         }
     }
 

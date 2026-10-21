@@ -94,13 +94,19 @@ namespace ams {
 
         // Initialise pm module
         psc::PmModuleId pm_module_id = static_cast<psc::PmModuleId>(0xBD);
-        // Bluetooth is listed so that this module is put to sleep before, and woken after, the bluetooth module:
-        // the BLE host then still has a working stack to drop its link on the way down
-        const psc::PmModuleId pm_dependencies[] = { psc::PmModuleId_Fs, psc::PmModuleId_Bluetooth };
+        // Bluetooth is listed so that this module is put to sleep before, and woken after, the bluetooth
+        // module: the BLE host then still has a working stack to drop its link on the way down. Only when the
+        // feature is on - registering the dependency changes the sleep/wake ordering for every user, and a
+        // power state cut that MissionControl does not acknowledge would be counted against it
+        const psc::PmModuleId pm_dependencies_all[] = { psc::PmModuleId_Fs, psc::PmModuleId_Bluetooth };
+        const psc::PmModuleId pm_dependencies_fs[] = { psc::PmModuleId_Fs };
+        const bool ble_enabled = ams::ble::IsEnabled();
+        const psc::PmModuleId *pm_dependencies = ble_enabled ? pm_dependencies_all : pm_dependencies_fs;
+        const size_t pm_dependency_count = ble_enabled ? util::size(pm_dependencies_all) : util::size(pm_dependencies_fs);
         psc::PmModule pm_module;
         psc::PmState pm_state;
         psc::PmFlagSet pm_flags;
-        R_ABORT_UNLESS(pm_module.Initialize(pm_module_id, pm_dependencies, util::size(pm_dependencies), os::EventClearMode_ManualClear));
+        R_ABORT_UNLESS(pm_module.Initialize(pm_module_id, pm_dependencies, pm_dependency_count, os::EventClearMode_ManualClear));
 
         // Create timer event for periodically checking whether the current running application has changed
         os::TimerEvent timer_event(os::EventClearMode_ManualClear);

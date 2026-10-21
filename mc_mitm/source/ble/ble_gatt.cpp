@@ -25,6 +25,11 @@ namespace ams::ble::gatt {
 
         constinit AttributeTable g_table = {};
 
+        // The stack reported more attributes than the table holds. Half a table is worse than none: a
+        // characteristic dropped from the middle leaves a CCCD bound to the descriptor before it, and the
+        // module would then enable notifications on a handle it never saw
+        constinit bool g_table_overflowed = false;
+
         // The first cache report after a connection replaces the table; reports after discovery has completed
         // mean the stack re-discovered the services
         constinit bool g_replace_pending = false;
@@ -40,6 +45,7 @@ namespace ams::ble::gatt {
 
         os::SdkMutex g_read_lock;
         bool g_read_pending = false;
+        u32 g_read_conn_id = 0;
         u16 g_read_uuid = 0;
         bool g_read_answered = false;
         bool g_read_failed = false;
@@ -115,9 +121,12 @@ namespace ams::ble::gatt {
         }
 
         for (u32 i = 0; i < std::min<u32>(e.info.client_cache_save.count, 10); ++i) {
-            if (g_table.count < MaxAttributes) {
-                g_table.attributes[g_table.count++] = e.info.client_cache_save.attr_list[i];
+            if (g_table.count >= MaxAttributes) {
+                log::Write("attribute table is full (%zu) and the device reported more: refusing to use it", MaxAttributes);
+                g_table_overflowed = true;
+                break;
             }
+            g_table.attributes[g_table.count++] = e.info.client_cache_save.attr_list[i];
         }
     }
 
@@ -125,6 +134,7 @@ namespace ams::ble::gatt {
         g_discovery_complete = false;
         g_rediscovered = false;
         g_replace_pending = true;
+        g_table_overflowed = false;
 
         const bool reuse = (g_table.count > 0) && AddressEqual(g_table.address, address);
         if (!reuse) {
@@ -159,6 +169,11 @@ namespace ams::ble::gatt {
     }
 
     Result Subscribe(u32 conn_id, HidService *out) {
+        if (g_table_overflowed) {
+            log::Write("attribute table was truncated, not subscribing to handles we may have misread");
+            R_THROW(svc::ResultNotSupported());
+        }
+
         auto found = FindService(GattServiceHid);
         if (!found) {
             log::Write("no HID service in attribute table");
@@ -249,7 +264,7 @@ namespace ams::ble::gatt {
         const auto &notify = e.info.client_notify;
 
         std::scoped_lock lk(g_read_lock);
-        if (!g_read_pending || !IsUuid16(notify.char_uuid, g_read_uuid)) {
+        if (!g_read_pending || (e.info.client_notify.conn_id != g_read_conn_id) || !IsUuid16(notify.char_uuid, g_read_uuid)) {
             return;
         }
 
@@ -275,6 +290,7 @@ namespace ams::ble::gatt {
         {
             std::scoped_lock lk(g_read_lock);
             g_read_pending = true;
+            g_read_conn_id = conn_id;
             g_read_uuid = uuid16;
             g_read_answered = false;
             g_read_failed = false;
@@ -307,6 +323,12 @@ namespace ams::ble::gatt {
                 }
             }
 
+            // The system switched BLE off while we were waiting: nothing else may be asked of the radio, and
+            // every answer to it has just been lost
+            if (!events::IsRadioEnabled()) {
+                break;
+            }
+
             if (os::GetSystemTick().ToTimeSpan() >= deadline) {
                 break;
             }
@@ -329,6 +351,13 @@ namespace ams::ble::gatt {
         u8 map[MaxReadSize];
         size_t map_size = 0;
         R_TRY(Read(conn_id, hid, GattCharReportMap, map, sizeof(map), &map_size));
+
+        // A map exactly the size of the buffer has almost certainly been cut short, and a pad identified from
+        // the prefix of its own report map is worse than one not identified at all
+        if (map_size == sizeof(map)) {
+            log::Write("report map filled the %zu byte read buffer: treating it as truncated", sizeof(map));
+            R_THROW(svc::ResultNotSupported());
+        }
 
         if (g_layout.Parse(map, map_size) != bluetooth::hogp::LayoutResult::Ok) {
             log::Write("report map of %zu bytes could not be parsed", map_size);

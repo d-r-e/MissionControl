@@ -59,6 +59,14 @@ namespace ams::ble {
         constinit os::SdkMutex g_controller_lock;
         std::shared_ptr<controller::SwitchController> g_controller;
 
+        // Reports are delivered from the LE HID thread, the resting reports from this thread, and the
+        // controller is attached and detached from whichever one noticed the Controllers screen opening. The
+        // controller classes keep input state (a report being assembled, the parsed sticks and buttons) with
+        // no lock of their own, because upstream only ever touches a controller from one thread; everything
+        // that enters one, or attaches and detaches it, therefore takes this lock. It is only ever taken
+        // before controller_management's own, never while holding it.
+        constinit os::SdkMutex g_delivery_lock;
+
         // Which pad the controller above turned out to be, read under g_controller_lock together with it. The
         // host never decodes a report: this only chooses which controller class a notification is handed to.
         constinit pad::Kind g_kind = pad::Kind::None;
@@ -67,10 +75,26 @@ namespace ams::ble {
         // it was subscribed for (see StadiaGattInput)
         constinit u64 g_endpoint_generation = 0;
 
+        // The link the presented controller belongs to. The stack recycles connection ids, so a notification
+        // still queued from a dying link would otherwise be handed to the controller of the next one
+        constinit u32 g_presented_conn_id = InvalidConnId;
+
         // Withdrawn from hid while the Controllers screen is open, as the screen does with every controller;
         // the link stays up and the controller comes back on LB+RB (any button once the screen is closed)
         constinit bool g_parked = false;
         constinit s64 g_present_tick = 0;
+
+        // A device that turned out not to be a pad this module can decode, and when it was last refused.
+        // Without this, the loop reconnects to it, refuses it and disconnects again for as long as the
+        // Controllers screen stays open
+        constinit bluetooth::Address g_refused_address = {};
+        constinit s64 g_refused_tick = 0;
+        constexpr TimeSpan RefusalBackoff = TimeSpan::FromSeconds(60);
+
+        bool RecentlyRefused(const bluetooth::Address &address) {
+            return (g_refused_tick != 0) && AddressEqual(address, g_refused_address) &&
+                   ((os::GetSystemTick() - os::Tick(g_refused_tick)).ToTimeSpan() < RefusalBackoff);
+        }
 
         // hid registers a controller on the first input report it sees after re-reading btm's device list, which
         // it does some time after being signalled; a report sent straight after the signal is dropped and the
@@ -105,6 +129,8 @@ namespace ams::ble {
         // the pad's own class knows what to do with it. Kept here rather than in a member for the same reason
         // the resting report is: the host holds a SwitchController, the type it was attached as.
         Result DeliverInput(const std::shared_ptr<controller::SwitchController> &controller, pad::Kind kind, const u8 *data, size_t size) {
+            std::scoped_lock lk(g_delivery_lock);
+
             switch (kind) {
                 case pad::Kind::Stadia:
                     return std::static_pointer_cast<controller::StadiaBleController>(controller)->HandleInputReport(data, size);
@@ -175,6 +201,8 @@ namespace ams::ble {
         }
 
         void Unpark() {
+            std::scoped_lock dk(g_delivery_lock);
+
             std::shared_ptr<controller::SwitchController> controller;
             {
                 std::scoped_lock lk(g_controller_lock);
@@ -236,6 +264,13 @@ namespace ams::ble {
                 }
 
                 if ((notify.type == GattNotifyType_Notification) && IsUuid16(notify.char_uuid, GattCharReport)) {
+                    if (notify.conn_id != g_presented_conn_id) {
+                        // The stack recycles connection ids: this is a report from a link that is not the one
+                        // the presented controller was built for, most often the tail of one just torn down
+                        log::Write("notification for conn_id=%u ignored, the presented controller is conn_id=%u", notify.conn_id, g_presented_conn_id);
+                        continue;
+                    }
+
                     const size_t size = std::min<size_t>(notify.size, sizeof(notify.data));
                     std::shared_ptr<controller::SwitchController> controller;
                     pad::Kind kind;
@@ -332,11 +367,19 @@ namespace ams::ble {
 
         // Blocks while the system has BLE switched off (sleep): any radio activity then wakes the console. A wake
         // re-registers btm's clients, so ours is picked up again afterwards.
-        void WaitForRadio() {
-            if (!events::IsRadioEnabled()) {
+        // False once the system is going away: the radio will not come back on, and the host must not be
+        // waiting for it when the shutdown joins this thread
+        bool WaitForRadio() {
+            while (!events::IsRadioEnabled() && !events::IsShuttingDown()) {
                 log::Write("ble switched off by the system, waiting");
                 events::WaitRadioEnabled();
-                log::Write("ble switched back on");
+                if (!events::IsShuttingDown()) {
+                    log::Write("ble switched back on");
+                }
+            }
+
+            if (events::IsShuttingDown()) {
+                return false;
             }
 
             if (events::TakeRadioCycled()) {
@@ -346,6 +389,7 @@ namespace ams::ble {
                 }
                 log::Write("using gatt client_if=%u", g_client_if);
             }
+            return true;
         }
 
         /* Auto-connect: the remembered controller, reconnected by the stack when it comes back */
@@ -557,9 +601,13 @@ namespace ams::ble {
                 return false;
             });
 
-            static_cast<void>(btdrvStopBleScan());
-            events::ExpectFilterEvent();
-            static_cast<void>(btdrvEnableBleScanFilter(true));
+            // Once the system has switched BLE off (and the wait above can end on exactly that), every radio
+            // call from here would wake the console straight back up
+            if (events::IsRadioEnabled()) {
+                static_cast<void>(btdrvStopBleScan());
+                events::ExpectFilterEvent();
+                static_cast<void>(btdrvEnableBleScanFilter(true));
+            }
 
             // The scan-complete and filter events trail the calls above
             events::Pump(TimeSpan::FromSeconds(1));
@@ -696,13 +744,14 @@ namespace ams::ble {
                 if (!hid.has_output_report) {
                     log::Write("no output Report characteristic, rumble unavailable");
                 }
-                controller = std::make_shared<controller::XboxOneBleController>(address, conn_id, hid.service.id, hid.service.is_primary, hid.output_report.id);
+                controller = std::make_shared<controller::XboxOneBleController>(address, conn_id, hid.service.id, hid.service.is_primary, hid.output_report.id, hid.has_output_report);
             }
 
             {
                 std::scoped_lock lk(g_controller_lock);
                 g_controller = controller;
                 g_kind = policy.kind;
+                g_presented_conn_id = conn_id;
                 g_parked = false;
                 g_present_tick = os::GetSystemTick().GetInt64Value();
             }
@@ -731,6 +780,7 @@ namespace ams::ble {
                 controller = std::move(g_controller);
                 g_controller = nullptr;
                 g_kind = pad::Kind::None;
+                g_presented_conn_id = InvalidConnId;
                 parked = g_parked;
                 g_parked = false;
                 for (auto &due : g_neutral_due) {
@@ -811,7 +861,10 @@ namespace ams::ble {
             LoadRememberedDevice();
 
             for (;;) {
-                WaitForRadio();
+                if (!WaitForRadio()) {
+                    log::Write("system is shutting down, the host stops here");
+                    break;
+                }
 
                 bluetooth::Address address;
                 u32 conn_id = InvalidConnId;
@@ -831,7 +884,11 @@ namespace ams::ble {
                         if (background) {
                             log::Write("remembered controller is in pairing mode, connecting");
                         }
-                        connected = R_SUCCEEDED(Connect(address, &conn_id, TimeSpan::FromSeconds(15)));
+                        if (RecentlyRefused(address)) {
+                            log::Write("this device was refused less than a minute ago, not reconnecting to it");
+                        } else {
+                            connected = R_SUCCEEDED(Connect(address, &conn_id, TimeSpan::FromSeconds(15)));
+                        }
                         if (!connected) {
                             Disconnect();
                         }
@@ -849,11 +906,13 @@ namespace ams::ble {
                 gatt::Discover(conn_id, address);
 
                 if (!Pair(address)) {
-                    g_pairing_failed_tick = os::GetSystemTick().GetInt64Value();
                     log::Write("backing off for %lds before trying to pair again", PairingRetryBackoff.GetSeconds());
                     Disconnect();
-                    // A cycle clears the backoff: the next attempt is against a fresh stack
                     RecycleRadio();
+                    // Set after the cycle, which clears it. Refusing to wait here meant a pad that will not
+                    // bond was retried - the radio crashed and brought back up each time - for as long as its
+                    // pairing button was held
+                    g_pairing_failed_tick = os::GetSystemTick().GetInt64Value();
                     os::SleepThread(TimeSpan::FromSeconds(1));
                     continue;
                 }
@@ -866,7 +925,7 @@ namespace ams::ble {
 
                 // The subscription is judged by the CCCD write's result; the pad only reports on input
                 events::ClearGattFailure();
-                gatt::HidService hid;
+                gatt::HidService hid = {};
                 rc = gatt::Subscribe(conn_id, &hid);
                 if (R_FAILED(rc)) {
                     log::Write("subscription failed rc=0x%x gatt_result=%u", rc.GetValue(), events::GetGattFailure());
@@ -919,6 +978,8 @@ namespace ams::ble {
                     if (policy.kind == pad::Kind::None) {
                         log::Write("nothing presented: this device is not a pad this module knows how to decode");
                         gatt::Dump("unrecognised device");
+                        g_refused_address = address;
+                        g_refused_tick = os::GetSystemTick().GetInt64Value();
                         Disconnect();
                         os::SleepThread(TimeSpan::FromSeconds(1));
                         continue;
@@ -974,6 +1035,9 @@ namespace ams::ble {
 
     void WaitFinished() {
         if (g_launched) {
+            // The host parks waiting for the radio whenever the system switches BLE off, and shutdown does
+            // exactly that; without this the join below would never return
+            events::BeginShutdown();
             os::WaitThread(&g_thread);
         }
     }
@@ -998,6 +1062,10 @@ namespace ams::ble {
 
         std::shared_ptr<controller::SwitchController> controller;
         {
+            // Held over the detach below: a report arriving in between would otherwise re-attach the
+            // controller and this thread would then take it back off again, leaving it marked unpresented
+            // while the system still thinks it is there
+            std::scoped_lock dk(g_delivery_lock);
             std::scoped_lock lk(g_controller_lock);
             if (!g_controller || g_parked || ((now - os::Tick(g_present_tick)).ToTimeSpan() < NewSessionGap)) {
                 return;
