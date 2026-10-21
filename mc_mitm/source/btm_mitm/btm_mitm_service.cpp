@@ -16,6 +16,7 @@
 #include "btm_mitm_service.hpp"
 #include "btm_shim.h"
 #include "btm_device_condition.hpp"
+#include "../ble/ble_hid_host.hpp"
 #include "../controllers/controller_management.hpp"
 
 namespace ams::mitm::btm {
@@ -34,6 +35,12 @@ namespace ams::mitm::btm {
     }
 
     Result BtmMitmService::AcquireDeviceConditionEvent(sf::OutCopyHandle out_handle) {
+        // Handing out our own event is only worth it when something can add devices to the list. With the BLE
+        // host disabled nothing else can, so btm's real event is passed through and the mitm stays out of the way.
+        if (!ams::ble::IsEnabled()) {
+            R_THROW(sm::mitm::ResultShouldForwardToSession());
+        }
+
         if (!condition::IsInitialized()) {
             // Forward to the real function to obtain the system event handle
             os::NativeHandle handle = os::InvalidNativeHandle;
@@ -68,7 +75,7 @@ namespace ams::mitm::btm {
 
         // Append controllers btm doesn't know about (Bluetooth LE). Where a real entry exists it serves as a
         // template for the fields whose meaning isn't known.
-        if ((profile == BtmProfile_Hid) || (profile == BtmProfile_None)) {
+        if (ams::ble::IsEnabled() && ((profile == BtmProfile_Hid) || (profile == BtmProfile_None))) {
             bluetooth::Address virtual_devices[4];
             size_t virtual_count = controller::GetVirtualDevices(virtual_devices, util::size(virtual_devices));
 

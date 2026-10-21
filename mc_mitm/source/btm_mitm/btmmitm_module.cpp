@@ -16,6 +16,7 @@
 #include "btmmitm_module.hpp"
 #include "btm_mitm_service.hpp"
 #include "btm_device_condition.hpp"
+#include "../ble/ble_hid_host.hpp"
 #include <stratosphere.hpp>
 
 namespace ams::mitm::btm {
@@ -72,7 +73,9 @@ namespace ams::mitm::btm {
     }
 
     void Launch() {
-        R_ABORT_UNLESS(condition::Initialize());
+        if (ams::ble::IsEnabled()) {
+            R_ABORT_UNLESS(condition::Initialize());
+        }
 
         R_ABORT_UNLESS(os::CreateThread(&g_thread,
             BtmMitmThreadFunction,
