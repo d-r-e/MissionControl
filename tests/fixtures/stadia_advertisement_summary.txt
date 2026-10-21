@@ -1,0 +1,22 @@
+Sanitized observation from operator-provided nRF Connect screenshots (2026-10-19).
+No device addresses, full device names, peripheral IDs or manufacturer payloads retained.
+
+Device transport: LE only
+Advertising type: Legacy
+Flags AD: type 0x01, value 0x05 (LE limited discoverable; BR/EDR unsupported)
+Appearance AD: type 0x19, value 0x03c4 (gamepad)
+Local-name AD: type 0x09, value redacted, 15 data bytes
+TX-power AD: type 0x0a, value -8 dBm
+Repeated appearance AD: type 0x19, value 0x03c4
+HID service AD: type 0x02 (incomplete 16-bit list), value UUID 0x1812
+
+Observed AD length/type pairs, in displayed RAW order:
+2/0x01, 3/0x19, 16/0x09, 2/0x0a, 3/0x19, 3/0x02
+Lengths include type but exclude the length octet.
+Combined size including length octets: 35 bytes.
+HID record begins at combined offset 31.
+
+A single legacy advertising/scan-response data payload is at most 31 bytes.
+The displayed buffer therefore combines packets/data; it is not one primary PDU.
+Primary-versus-scan-response boundary was NOT independently captured.
+HID being scan-response-only is strongly suggested, not yet proven.

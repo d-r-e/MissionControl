@@ -1,0 +1,36 @@
+# Stadia Switch connection trace — sanitized live evidence
+# Module: reviewed passive trace build e581ed621340f270fee145a455b7f078431f7409000000000000000000000000
+# Probe 0.6.26, HOS 21.2.0. One physical-A-gated managed connect, no discovery scan.
+# Mac Bluetooth OFF: automated preflight. Android Bluetooth OFF: operator confirmed.
+# Operator explicitly confirmed Stadia was orange-flashing before A.
+# No addresses, native/client/managed IDs, ARUIDs, tokens, names or payloads retained.
+
+managed_connect_request_count=1
+managed_connect_ipc_result=0
+native_matching_request_count=1
+native_request_direct_valid=1
+native_request_is_direct=1
+native_matching_callback_count=1
+trace_ambiguous=0
+callback_raw_result=0x1a
+callback_raw_status=2
+callback_raw_reason=0
+callback_connection_id_valid=0
+successful_connected_callback_count=0
+successful_disconnected_callback_count=0
+managed_target_handle_observed=0
+observer_retirement_confirmed=1
+native_cleanup_confirmed_by_retirement=0
+
+# No app GATT cache/value read, write, subscription, explicit pairing,
+# managed disconnect, lease arm, raw cancel or retry was requested.
+# Raw result namespace/meaning and exact callback arrival time are unestablished.
+# Matching request/callback evidence is not proof of physical-link history,
+# security/bonding failure, HCI Unsupported Remote Feature, or GATT readiness.
+
+# Recovery: operator rebooted through Hekate, Stadia OFF; read-only verification
+# confirmed the same loaded code, trace available/unconsumed, no connection hooks
+# or connection events in this boot, clean filters/legacy lease and 12 idle,
+# balanced Core/HID/BLE snapshots. PLUS exit observed. No second connection run.
+# Logs: private local passive-connection-trace-20261020T190117Z archive,
+# managed-connection-trace-1.log and post-attempt-recovery.log.

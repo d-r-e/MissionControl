@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>org.missioncontrol.stadia-advertisement</string>
+    <key>CFBundleName</key>
+    <string>Stadia Advertisement Capture</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Inspect Stadia controller BLE advertising services to diagnose Switch discovery. No pairing or connection is performed.</string>
+    <key>NSBluetoothPeripheralUsageDescription</key>
+    <string>Inspect Stadia controller BLE advertising services without pairing or connecting.</string>
+</dict>
+</plist>

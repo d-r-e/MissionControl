@@ -1,0 +1,43 @@
+{
+  "source_commit": "71bbe2d4e97d618775b5a3e2f91bfeaf52d8b75e",
+  "interface_command_ids": [1, 2, 15, 16, 19, 20, 27, 36, 37, 38, 46, 78, 79, 65000, 65001, 65002, 65003, 65004, 65005, 65006, 65007],
+  "native_event_calls": {
+    "bluetooth_core.cpp": [
+      "g_init_event.Signal()",
+      "g_init_event.Wait()",
+      "g_enable_event.Signal()",
+      "g_enable_event.Wait()",
+      "g_system_event_fwd.Signal()",
+      "g_data_read_event.Signal()",
+      "btdrvLegacyGetAdapterProperty(BtdrvBluetoothPropertyType_Address, &host_address, sizeof(bluetooth::Address)",
+      "btdrvLegacyRespondToPinRequest(event_info->pairing_pin_code_request.addr, false, &pin, pin_length)",
+      "btdrvGetAdapterProperty(BtdrvAdapterPropertyType_Address, &property)",
+      "btdrvRespondToPinRequest(event_info->pairing_pin_code_request.addr, &pin)",
+      "btdrvGetEventInfo(&g_event_info, sizeof(bluetooth::EventInfo)",
+      "g_custom_data_event.Signal()",
+      "g_data_read_event.Wait()",
+      "g_system_event_fwd.Signal()",
+      "g_data_read_event.Wait()",
+      "g_system_event_user_fwd.Signal()"
+    ],
+    "bluetooth_hid.cpp": [
+      "g_init_event.Signal()",
+      "g_init_event.Wait()",
+      "g_system_event_fwd.Signal()",
+      "g_data_read_event.Signal()",
+      "btdrvGetHidEventInfo(&g_event_info, sizeof(bluetooth::HidEventInfo)",
+      "g_system_event_fwd.Signal()",
+      "g_data_read_event.Wait()",
+      "g_system_event_user_fwd.Signal()"
+    ],
+    "bluetooth_ble.cpp": [
+      "g_init_event.Signal()",
+      "g_init_event.Wait()",
+      "g_data_read_event.Signal()",
+      "btdrvGetBleManagedEventInfo(&g_event_info, sizeof(bluetooth::BleEventInfo)",
+      "g_system_event_fwd.Signal()",
+      "g_data_read_event.Wait()",
+      "g_system_event_user_fwd.Signal()"
+    ]
+  }
+}

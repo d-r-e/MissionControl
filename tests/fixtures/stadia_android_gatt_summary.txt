@@ -1,0 +1,56 @@
+Sanitized visual observation from operator-provided nRF Connect Android screenshots, 2026-10-20.
+This is a service-discovery UI observation, not a packet capture or attribute-value export.
+No device addresses, full device names, identifiers, keys or raw report payloads retained.
+
+Visible primary service: Human Interface Device, UUID 0x1812.
+Visible characteristic rows within that service:
+- Protocol Mode, UUID 0x2a4e: READ, WRITE.
+- Report, UUID 0x2a4d: NOTIFY, READ.
+  Visible descriptors: Client Characteristic Configuration 0x2902; Report Reference 0x2908.
+- Report, UUID 0x2a4d: READ, WRITE.
+  Visible descriptors: Client Characteristic Configuration 0x2902; Report Reference 0x2908.
+- Report Map, UUID 0x2a4b: READ.
+- HID Information, UUID 0x2a4a: READ.
+- HID Control Point, UUID 0x2a4c: WRITE.
+
+Two Report characteristic rows are visible; their shared UUID is not a unique endpoint identity.
+Only one of these rows advertises NOTIFY. Neither Report Reference value was captured.
+Do not classify the second Report as Output versus Feature without its reference value.
+No Report Map, characteristic/descriptor handles, instance IDs or notification values were captured.
+This does not validate raw GATT input, Switch transport or completion/notification ownership.
+
+Security/lifecycle observations:
+- Earlier screenshot: CONNECTED, BONDING...
+- Later screenshot: DISCONNECTED, NOT BONDED.
+A bonding procedure was observed in progress; no completed bond is shown.
+The initiator and reason for bonding, and whether the operator cancelled a prompt, are unknown.
+The later state is app-reported disconnected/not bonded; it is not proof of global radio cleanup.
+No claim is made that the app/platform performed no automatic reads, writes or security operations.
+Further requests were initially deferred while the bonding origin was unknown.
+
+Follow-up screenshots and operator clarification, later on 2026-10-20:
+- Operator explicitly reports accepting the pairing prompt.
+- Earlier follow-up screenshot: CONNECTED, BONDED.
+- Later follow-up screenshot: DISCONNECTED, BONDED.
+- The same six characteristic rows and two Report rows remain visible.
+This confirms an operator-accepted bond and an app-reported connected state, then
+an app-reported disconnected state with the bond retained. It does not establish
+that all attributes require bonding, or explain a Switch connection error.
+No keys were requested or inspected; no bond removal/reset was requested.
+No characteristic or descriptor values are visible in these follow-up images.
+Before future Switch/Stadia trials, Android Bluetooth must also be off to avoid
+this newly bonded host automatically reconnecting. Disconnect is not unpair.
+
+Attempted Report Reference read, subsequently reported by operator:
+- Tapping read produced no visible descriptor value.
+- App log reported an exception requiring BLUETOOTH_PRIVILEGED.
+- No Report ID/type bytes or other raw GATT input values were obtained.
+Android 16 AOSP GattService restricts HID Report characteristic handles and their
+associated descriptors. readDescriptor checks the local privileged permission
+before dispatching its native read. Its permission check has no bond exemption.
+The reported failure is an Android app-access restriction, not a remote ATT
+error or proof that the descriptor is unreadable on other hosts.
+Do not retry, change bonds, request a permission grant, or use an older-target
+APK as a workaround; older-target exception suppression still skips the read.
+Source: https://android.googlesource.com/platform/packages/modules/Bluetooth/+/refs/heads/android16-release/android/app/src/com/android/bluetooth/gatt/GattService.java
+
