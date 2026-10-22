@@ -18,6 +18,7 @@
 #include "ble_events.hpp"
 #include "ble_log.hpp"
 #include "ble_gatt_read.hpp"
+#include "ble_gatt_cache.hpp"
 #include "ble_diagnostics.hpp"
 #include "../bluetooth_mitm/bluetooth/hid_report_layout.hpp"
 
@@ -27,16 +28,9 @@ namespace ams::ble::gatt {
 
         constinit AttributeTable g_table = {};
 
-        // The stack reported more attributes than the table holds. Half a table is worse than none: a
-        // characteristic dropped from the middle leaves a CCCD bound to the descriptor before it, and the
-        // module would then enable notifications on a handle it never saw
-        constinit bool g_table_overflowed = false;
-
-        // The first cache report after a connection replaces the table; reports after discovery has completed
-        // mean the stack re-discovered the services
-        constinit bool g_replace_pending = false;
-        constinit bool g_discovery_complete = false;
-        constinit bool g_rediscovered = false;
+        // A partial attribute table is unsafe: it can associate a CCCD with the wrong characteristic.
+        // The SDK-free lifecycle below is the production implementation exercised by portable tests.
+        constinit DiscoveryCache g_cache;
 
         // Values from a characteristic read come back on the LE HID event stream as ClientNotify records, from
         // the LE HID thread, while the host thread waits. One read is in flight at a time: the host already
@@ -123,38 +117,20 @@ namespace ams::ble::gatt {
             events::NoteGattResult(e.info.client_notify.result);
             return;
         }
-        if ((e.type != BtdrvBleEventType_ClientCacheSave) || (e.info.client_cache_save.conn_id != events::GetConnection())) {
+        if (e.type != BtdrvBleEventType_ClientCacheSave) {
             return;
         }
-
-        if (g_discovery_complete) {
-            g_rediscovered = true;
-        }
-
-        if (g_replace_pending) {
-            g_replace_pending = false;
-            g_table.count = 0;
-        }
-
-        for (u32 i = 0; i < std::min<u32>(e.info.client_cache_save.count, 10); ++i) {
-            if (g_table.count >= MaxAttributes) {
-                log::Write("attribute table is full (%zu) and the device reported more: refusing to use it", MaxAttributes);
-                g_table_overflowed = true;
-                break;
-            }
-            g_table.attributes[g_table.count++] = e.info.client_cache_save.attr_list[i];
+        const auto result = g_cache.Append(g_table, e.info.client_cache_save.conn_id, events::GetConnection(),
+            e.info.client_cache_save.attr_list, e.info.client_cache_save.count);
+        if (result == CacheAppendResult::Overflow) {
+            log::Write("attribute table is full (%zu) and the device reported more: refusing to use it", MaxAttributes);
         }
     }
 
     void PrepareDiscovery(const bluetooth::Address &address) {
         // Host-thread only, once per new link and before Pair pumps the event sink. Never carry the previous
         // link's attribute table into a security-first setup, even when reconnecting to the same address.
-        g_discovery_complete = false;
-        g_rediscovered = false;
-        g_replace_pending = true;
-        g_table_overflowed = false;
-        g_table.count = 0;
-        g_table.address = address;
+        g_cache.Prepare(g_table, address);
     }
 
     void Discover(u32 conn_id, const bluetooth::Address &address) {
@@ -176,21 +152,18 @@ namespace ams::ble::gatt {
         events::WaitFor(BtdrvBleEventType_ClientConfigureMtu, TimeSpan::FromSeconds(5), nullptr, [&](const EventRecord &r) { return r.info.client_configure_mtu.conn_id == conn_id; });
         events::Pump(TimeSpan::FromMilliSeconds(500));
 
-        g_discovery_complete = true;
-        g_replace_pending = false;
+        g_cache.Complete();
         log::Write("attribute table holds %u entries%s", g_table.count, cached_during_bond ? " (received during bond phase)" : "");
     }
 
     bool TakeRediscovered() {
-        const bool rediscovered = g_rediscovered;
-        g_rediscovered = false;
-        return rediscovered;
+        return g_cache.TakeRediscovered();
     }
 
     Result Subscribe(u32 conn_id, HidService *out) {
         g_report_map_size = 0;
         g_report_map_connection = InvalidConnId;
-        if (g_table_overflowed) {
+        if (g_cache.Overflowed()) {
             log::Write("attribute table was truncated, not subscribing to handles we may have misread");
             R_THROW(svc::ResultNotSupported());
         }

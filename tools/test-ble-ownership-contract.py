@@ -116,17 +116,21 @@ class OwnershipContracts(unittest.TestCase):
         self.assertEqual(host.count("Pair(address)"), 1)
         self.assertEqual(host.count("gatt::PrepareDiscovery(address)"), 1)
         prepare = body(source("ble/ble_gatt.cpp"), "void PrepareDiscovery(")
-        for statement in ("g_table.count = 0", "g_table.address = address",
-                          "g_discovery_complete = false", "g_replace_pending = true",
-                          "g_table_overflowed = false", "g_rediscovered = false"):
-            self.assertIn(statement, prepare)
+        self.assertIn("g_cache.Prepare(g_table, address);", prepare)
         self.assertNotIn("btdrv", prepare)
+        cache = source("ble/ble_gatt_cache.hpp")
+        self.assertIn("table.count = 0;", body(cache, "void Prepare("))
+        self.assertIn("table.address = address;", body(cache, "void Prepare("))
         discover = body(source("ble/ble_gatt.cpp"), "void Discover(")
         self.assertIn("if (!cached_during_bond)", discover)
         self.assertNotIn("g_table.count = 0", discover)
         self.assertNotIn("g_replace_pending = true", discover)
         sink = body(source("ble/ble_gatt.cpp"), "void OnEvent(")
-        self.assertIn("e.info.client_cache_save.conn_id != events::GetConnection()", sink)
+        self.assertIn("if (e.type != BtdrvBleEventType_ClientCacheSave)", sink)
+        self.assertIn("g_cache.Append(g_table, e.info.client_cache_save.conn_id, events::GetConnection(),", sink)
+        self.assertIn("g_cache.Complete();", discover)
+        subscribe = body(source("ble/ble_gatt.cpp"), "Result Subscribe(")
+        self.assertIn("if (g_cache.Overflowed())", subscribe)
 
     def test_listener_and_read_do_not_add_requests(self):
         listener = body(source("ble/ble_hid_host.cpp"), "void LeHidThreadFunc(")

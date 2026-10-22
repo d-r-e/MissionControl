@@ -19,9 +19,9 @@
 namespace ams::ble::gatt {
 
     /*
-     * The stack reports a connected device's attributes (ClientCacheSave events) when it discovers them, and
-     * serves them from its own cache without reporting on later connections. The table is therefore kept for
-     * the device across connections and only replaced when the stack reports a fresh discovery.
+     * The stack reports attributes in ClientCacheSave batches, including during pairing. PrepareDiscovery
+     * clears the local table for each new link before those events are pumped; Discover retains the batches
+     * already received on that link. Local state is not reused merely because an address/connection ID matches.
      */
 
     constexpr size_t MaxAttributes = 64;

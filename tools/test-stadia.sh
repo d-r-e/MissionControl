@@ -53,6 +53,11 @@ trap 'rm -rf "$build"' EXIT
     -I "$root/mc_mitm/source/ble" \
     "$root/tests/ble_gatt_read_tests.cpp" -o "$build/ble-gatt-read-tests"
 "$build/ble-gatt-read-tests"
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
+    -fsanitize=address,undefined -fno-omit-frame-pointer -g \
+    -I "$root/mc_mitm/source/ble" \
+    "$root/tests/ble_gatt_cache_tests.cpp" -o "$build/ble-gatt-cache-tests"
+"$build/ble-gatt-cache-tests"
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic -pthread \
     -fsanitize=address,undefined -fno-omit-frame-pointer -g \
     -I "$root/mc_mitm/source/ble" \
