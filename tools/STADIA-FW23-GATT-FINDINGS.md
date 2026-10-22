@@ -1,6 +1,93 @@
 # Firmware 23 GATT completion investigation
 
-## OPERATOR DISABLED MISSIONCONTROL
+## Committed source checkpoints
+
+- `0af48de`: source checkpoint for installed diagnostic5ed1417e and Input Lab1.0.1,
+  verified against all31 receipt-manifest file hashes without overwriting the working tree.
+- `48ba734`: subsequent production-cache extraction and behavioral tests, NOT deployed.
+  Full portable suite/pinned target build passed; NPDM identical to the installed baseline.
+  Existing duplicate accumulation and same-ID stale-event limitations remain unchanged.
+
+
+## Current: operator-approved latency diagnostic installed; auto-start re-enabled
+
+After regular play, operator returned to investigation, enabled FTP, and explicitly selected
+“Install and re-enable.” Current SD module:242049bytes, SHA-256
+`5ed1417eef4917b85e857374c24dd51e52e39168e0e8d6d0137731a725e62e73`.
+Full module readback verified; `boot2.flag` restored from the disabled original and verified.
+INI and Input Lab1.0.1 unchanged; NPDM byte-identical. Manual reboot is still required.
+Backups/source/artifact/build/test/review provenance:
+`receipt-input-timing-20261022T191110Z/` under the bench cache.
+
+Diagnostic additions use fixed-size lock-free atomic RAM histograms, gated by BLE+logging:
+slot-read IPC time, notification-return gaps, delivery-lock waits, translation+injection time,
+listener input work, all-HID FIFO write time/approximate pre-write occupancy and write failures.
+No packet capture, payload logging, queue consumption/discard, report retry, radio/pairing change
+or scheduling-priority change. The queue class/layout is unchanged. All-HID occupancy includes
+other controllers and is measured in bytes, not packet age. Return gaps include idle and do not
+measure radio arrival, time before the listener woke, or end-to-end latency.
+
+Summary logs ONLY on the host thread after connection processing returns AND the link is
+disconnected, radio enabled and system not shutting down. No periodic/per-report diagnostic SD
+writes during the active test. Review found the disconnected guard was needed for a rediscovery
+failure path; it was added and the full suite/pinned build rerun successfully.
+
+Operator protocol: reboot with Stadia off; wait30s and compare HOME with a regular controller;
+pair Stadia once, wait5s, compare HOME buttons/sticks and Input Lab during continuous motion for
+20–30s; switch Stadia OFF while keeping the console awake, wait5s for summary persistence, then
+enable FTP for read-only retrieval. Stop after one failed pairing rather than blind retries.
+Actual lag cause remains unproved; prior lower listener priority/FIFO backlog are hypotheses.
+Do not tune priority/radio or claim this observer fixes lag without measured evidence.
+
+### First diagnostic operator result: power transitions, then bonding-stage failure
+
+Read-only FTP snapshot `timing-reconnect-20261022T191924Z/`:
+`ble.log`9719bytes SHA-256
+`3a65844dd4893fc37491445a1fc2f5198f81a7b5d35a8b7169b4f6e5eed92610`.
+Module/INI hashes remain exactly the deployed values; boot2.flag present. No writes.
+
+Operator reports initial pairing worked, no menu lag afterward, then failure to reconnect after
+disconnect/new pairing. This does not prove stick latency is resolved. Trace:
+- Initial link82.883s; bond82.918s; full successful GATT and presentation89.897s.
+- At100.225s the module's PrepareForSleep path explicitly disconnects the link
+  (reason0x0016). At106.335s recovery says “link was dropped for sleep, no radio cycle”;
+  BLE off/on106.341/106.944s. Another power transition appears118.525..128.230s.
+- Fresh link succeeds150.397s. Bond request150.440s; link fails150.701s
+  (ClientConnection result26, reason0x0016), BEFORE explicit GATT/report-map reads.
+- Pair reports failure150.847s; intentional setup-failure latch150.857s prevents blind retries
+  until reboot. This is not proof of a hung notification reader or a crashed module.
+
+No timing summary was emitted: the disconnect occurred in a power-transition path with radio
+marked unavailable, so the awake-only logging guard correctly suppressed SD writes. Do not
+claim measured latency results from this run. Ask whether the console actually slept/woke or
+only Stadia was turned off; log evidence establishes the module's power-path behavior, not the
+operator's intent. Do not mislabel a ClientConnection result26 as a verified ATT/security error.
+Next controlled timing attempt must keep the console awake and power off ONLY the controller
+at the end. Current boot's failure latch requires a manual reboot before another single test.
+
+### Later awake-only diagnostic: backend processing fast in this sample
+
+Read-only snapshot `reconnect-research-20261022T193418Z/`, log9243bytes, SHA-256
+`d75e8922899b50ed46bbbedc90b1171ef9ba60370728730c3619632027a8a0bd`.
+Installed module5ed1417e, INIfc3b and active bootflag verified unchanged.
+
+Presentation81.592s; awake disconnect133.548s (reason0x0008); summary133.634s.
+Listener input work53samples avg121us, all<=500us; translation+injection57samples
+avg55us, all<=500us (includes neutral replay). All-HID FIFO72writes, zero sampled
+pre-write occupancy throughout, zero failures. This is no evidence of an injection backlog
+in this run, not proof of end-to-end latency or absence of intermittent/pre-wake delay.
+52notification return gaps include idle, not a polling-rate measurement.
+Configured recovery cycle134.743..140.762s; no second presentation in this snapshot.
+
+Current reconnect findings and public references are in `STADIA-RECONNECT-RESEARCH.md`.
+Important native-evidence correction: the earlier file named `bond-0x800316d0.json` is NOT
+verified as CreateBond. Its16byte field/length and32byte message match a PIN-code reply;
+do not infer SMP policy from it. A bounded parent-session native pass retained11Evidence
+records in `reconnect-native-research/parent-session-evidence.json`, then closed the session.
+Exact bond-command dispatch/policy and durable mutual bond retention remain unresolved.
+No console changes or new radio tests were made during this research.
+
+## Previous operator disable (historical)
 
 Operator requests normal play because of input lag. MissionControl auto-start was reversibly
 DISABLED over explicitly authorized FTP: only `flags/boot2.flag` under title
