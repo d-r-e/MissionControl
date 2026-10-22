@@ -42,7 +42,10 @@ namespace ams::ble::gatt {
     // Event sink, see events::SetSink
     void OnEvent(const EventRecord &record);
 
-    // Waits for the stack to report the device's attributes, reusing the table held for it if none arrive
+    // Starts this link's passive cache before Pair pumps events; does not issue a driver/radio request.
+    void PrepareDiscovery(const bluetooth::Address &address);
+
+    // Completes discovery/MTU work after the bond request, retaining this link's automatic cache records.
     void Discover(u32 conn_id, const bluetooth::Address &address);
 
     // Set when a cache report arrived after discovery completed, i.e. the stack re-discovered the services
@@ -67,15 +70,15 @@ namespace ams::ble::gatt {
         bool has_hid_control_point;   // 0x2A4C
     };
 
-    // Values read with btdrvReadGattCharacteristic come back on the LE HID event stream as ClientNotify
-    // records, which the LE HID thread hands here so a read can be waited for.
+    // ClientNotify completions from either the managed sink or the LE HID listener feed the same
+    // connection/UUID-scoped pending read.
     void OnClientNotify(const EventRecord &record);
 
     // Reads one characteristic of the HID service, selected by 16-bit uuid.
     Result Read(u32 conn_id, const HidService &hid, u16 uuid16, void *out, size_t out_size, size_t *out_len);
 
-    // Reads and parses the Report Map and notes which optional HID characteristics exist. The facts it
-    // returns are what identify a pad; when they cannot be obtained, the caller must not guess.
+    // Parses the Report Map retained by Subscribe's authenticated read and notes optional characteristics.
+    // No duplicate read is issued. Missing facts must not be guessed.
     Result Describe(u32 conn_id, const HidService &hid, ReportFacts *out);
 
     // Writes the attribute table to the log. With one controller on the bench this is the difference between

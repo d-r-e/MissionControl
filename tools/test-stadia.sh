@@ -6,6 +6,11 @@ trap 'rm -rf "$build"' EXIT
 
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
     -fsanitize=address,undefined -fno-omit-frame-pointer -g \
+    "$root/tools/stadia-input-test/tests/model-ui-tests.cpp" -o "$build/stadia-input-test-tests"
+"$build/stadia-input-test-tests"
+
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
+    -fsanitize=address,undefined -fno-omit-frame-pointer -g \
     -I "$root/mc_mitm/source/controllers" \
     "$root/tests/stadia_report_tests.cpp" -o "$build/stadia-report-tests"
 "$build/stadia-report-tests" "$root/tests/fixtures/stadia_bluetooth_reports.txt"
@@ -43,6 +48,22 @@ trap 'rm -rf "$build"' EXIT
     -I "$root/mc_mitm/source/ble" \
     "$root/tests/ble_pad_tests.cpp" -o "$build/ble-pad-tests"
 "$build/ble-pad-tests"
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
+    -fsanitize=address,undefined -fno-omit-frame-pointer -g \
+    -I "$root/mc_mitm/source/ble" \
+    "$root/tests/ble_gatt_read_tests.cpp" -o "$build/ble-gatt-read-tests"
+"$build/ble-gatt-read-tests"
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic -pthread \
+    -fsanitize=address,undefined -fno-omit-frame-pointer -g \
+    -I "$root/mc_mitm/source/ble" \
+    "$root/tests/ble_event_observation_tests.cpp" -o "$build/ble-event-observation-tests"
+"$build/ble-event-observation-tests"
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic -pthread \
+    -fsanitize=address,undefined -fno-omit-frame-pointer -g \
+    -I "$root/mc_mitm/source/ble" \
+    "$root/tests/ble_input_timing_tests.cpp" -o "$build/ble-input-timing-tests"
+"$build/ble-input-timing-tests"
+python3 "$root/tools/test-ble-ownership-contract.py"
 python3 "$root/tools/stadia-probe/prepare-target.py" --self-test
 # tools/check-stadia-scope.py guarded the module-side probe/trace instrumentation, which now
 # lives on branch diag/ble-probe and is intentionally absent from this branch.

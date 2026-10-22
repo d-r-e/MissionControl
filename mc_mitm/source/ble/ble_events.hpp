@@ -67,7 +67,7 @@ namespace ams::ble::events {
     void SetInquiryActive(bool active);
     bool IsPairingWindowOpen();
 
-    // Set when the stack reports the bond with the target complete (core Connection event)
+    // Core lifecycle-event heuristic used by the port; NOT proof of successful bonding or encryption.
     bool TakeBondComplete();
 
     // The console's sleep state (from the psc power module): no radio activity is allowed while asleep

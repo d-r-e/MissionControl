@@ -14,10 +14,11 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "ble_hid_host.hpp"
+#include "ble_diagnostics.hpp"
 #include "ble_advertisement.hpp"
 #include "ble_events.hpp"
 #include "ble_gatt.hpp"
-#include "ble_pad.hpp"
+#include "ble_pad_input.hpp"
 #include "ble_log.hpp"
 #include "ble_results.hpp"
 #include "../mcmitm_config.hpp"
@@ -50,10 +51,14 @@ namespace ams::ble {
 
         constinit u8 g_client_if = InvalidClientIf;
 
-        // A refused pairing leaves the stack refusing the next ones for a while, so asking again straight away
-        // only keeps that going
-        constexpr TimeSpan PairingRetryBackoff = TimeSpan::FromSeconds(30);
-        constinit s64 g_pairing_failed_tick = 0;
+        // A setup failure may leave an ATT/security request outstanding. Do not reconnect or cycle the radio
+        // automatically after it: preserve the first failure for diagnosis and require an operator reboot.
+        bool g_setup_failed = false;
+
+        void StopAfterSetupFailure(const char *stage) {
+            g_setup_failed = true;
+            log::Write("setup stopped at %s; no automatic retry or recovery radio cycle until reboot", stage);
+        }
 
         /* The controller currently presented to the system */
         constinit os::SdkMutex g_controller_lock;
@@ -129,7 +134,11 @@ namespace ams::ble {
         // the pad's own class knows what to do with it. Kept here rather than in a member for the same reason
         // the resting report is: the host holds a SwitchController, the type it was attached as.
         Result DeliverInput(const std::shared_ptr<controller::SwitchController> &controller, pad::Kind kind, const u8 *data, size_t size) {
+            const auto lock_start = diagnostics::InputNowUs();
             std::scoped_lock lk(g_delivery_lock);
+            diagnostics::RecordInputDuration(diagnostics::TimingMetric::DeliveryLock, lock_start);
+            const auto processing_start = diagnostics::InputNowUs();
+            ON_SCOPE_EXIT { diagnostics::RecordInputDuration(diagnostics::TimingMetric::TranslateInject, processing_start); };
 
             switch (kind) {
                 case pad::Kind::Stadia:
@@ -174,14 +183,6 @@ namespace ams::ble {
 
         /* Report layout on the LE HID stream: XboxOneInputReport0x01 without the report id */
         constexpr size_t ReportOffsetTriggers = 8;
-        constexpr size_t ReportOffsetDpad     = 12;
-        constexpr size_t ReportOffsetButtons  = 13;
-        constexpr u8 ReportButtonsLbRb        = 0xC0;
-
-        bool ReportHasLbRb(const u8 *data, size_t size) {
-            return (size > ReportOffsetButtons) && ((data[ReportOffsetButtons] & ReportButtonsLbRb) == ReportButtonsLbRb);
-        }
-
         bool ReportHasAnyInput(const u8 *data, size_t size) {
             for (size_t i = ReportOffsetTriggers; i < std::min(size, sizeof(controller::XboxOneInputReport0x01)); ++i) {
                 if (data[i] != 0) {
@@ -238,9 +239,11 @@ namespace ams::ble {
            of our GATT requests on them, arrive here rather than on the managed BLE event */
 
         void LeHidThreadFunc(void *) {
+            diagnostics::Note(diagnostics::Metric::ListenerStarted);
             Event event;
             Result rc = btdrvRegisterBleHidEvent(&event);
             log::Write("btdrvRegisterBleHidEvent rc=0x%x", rc.GetValue());
+            diagnostics::Note(R_SUCCEEDED(rc) ? diagnostics::Metric::ListenerRegistered : diagnostics::Metric::ListenerRegistrationFailed);
             if (R_FAILED(rc)) {
                 return;
             }
@@ -248,21 +251,34 @@ namespace ams::ble {
             os::SystemEvent system_event;
             system_event.AttachReadableHandle(event.revent, false, os::EventClearMode_AutoClear);
 
+            u64 last_report_us = 0;
+            u32 last_session = 0;
             for (;;) {
                 system_event.Wait();
+                const auto work_start = diagnostics::InputNowUs();
+                diagnostics::Note(diagnostics::Metric::ListenerWake);
 
+                const auto ipc_start = diagnostics::InputNowUs();
                 rc = btdrvGetLeHidEventInfo(&g_le_hid_record.info, sizeof(g_le_hid_record.info), &g_le_hid_record.type);
+                const auto report_return_us = diagnostics::InputNowUs();
+                diagnostics::RecordInputDuration(diagnostics::TimingMetric::SlotIpc, ipc_start);
                 if (R_FAILED(rc)) {
+                    diagnostics::Note(diagnostics::Metric::ListenerReadFailed);
                     log::Write("btdrvGetLeHidEventInfo rc=0x%x", rc.GetValue());
                     continue;
                 }
 
+                // A successful IPC return (and even a previously stored type) does not prove a nonempty slot.
+                diagnostics::Note(diagnostics::Metric::ListenerReadReturned);
+                diagnostics::Note(g_le_hid_record.type == BtdrvBleEventType_ClientNotify ?
+                    diagnostics::Metric::ListenerNotifyType : diagnostics::Metric::ListenerOtherType);
                 auto &notify = g_le_hid_record.info.client_notify;
                 if ((g_le_hid_record.type != BtdrvBleEventType_ClientNotify) || (notify.conn_id != events::GetConnection())) {
                     events::Log(g_le_hid_record);
                     continue;
                 }
 
+                diagnostics::Note(diagnostics::Metric::ListenerCurrentConnection);
                 if ((notify.type == GattNotifyType_Notification) && IsUuid16(notify.char_uuid, GattCharReport)) {
                     if (notify.conn_id != g_presented_conn_id) {
                         // The stack recycles connection ids: this is a report from a link that is not the one
@@ -271,6 +287,13 @@ namespace ams::ble {
                         continue;
                     }
 
+                    const u32 session = diagnostics::InputSession();
+                    if (session != last_session) { last_session = session; last_report_us = 0; }
+                    if (last_report_us && report_return_us >= last_report_us) {
+                        diagnostics::RecordInputValue(diagnostics::TimingMetric::NotificationGap, report_return_us - last_report_us);
+                    }
+                    last_report_us = report_return_us;
+                    ON_SCOPE_EXIT { diagnostics::RecordInputDuration(diagnostics::TimingMetric::InputWork, work_start); };
                     const size_t size = std::min<size_t>(notify.size, sizeof(notify.data));
                     std::shared_ptr<controller::SwitchController> controller;
                     pad::Kind kind;
@@ -283,7 +306,7 @@ namespace ams::ble {
                     }
                     if (parked) {
                         // What brings a controller back on the Controllers screen is L+R; afterwards any button does
-                        if (ReportHasLbRb(notify.data, size) || (!events::IsPairingWindowOpen() && ReportCarriesInput(kind, notify.data, size))) {
+                        if (pad::HasLrShoulders(kind, notify.data, size) || (!events::IsPairingWindowOpen() && ReportCarriesInput(kind, notify.data, size))) {
                             Unpark();
                         } else {
                             continue;
@@ -297,6 +320,7 @@ namespace ams::ble {
                     }
                 } else {
                     // The value of a characteristic we asked to read arrives here as well
+                    log::Write("GATT completion source=LE-HID");
                     gatt::OnClientNotify(g_le_hid_record);
                     events::NoteGattResult(notify.result);
                     events::Log(g_le_hid_record);
@@ -493,7 +517,7 @@ namespace ams::ble {
                 return;
             }
 
-            if (!mitm::GetGlobalConfig()->ble.radio_cycle || !events::IsRadioEnabled()) {
+            if (g_setup_failed || !mitm::GetGlobalConfig()->ble.radio_cycle || !events::IsRadioEnabled()) {
                 return;
             }
 
@@ -506,7 +530,6 @@ namespace ams::ble {
             }
 
             events::Pump(TimeSpan::FromSeconds(6));
-            g_pairing_failed_tick = 0;
 
             if (u8 spare = events::GetSpareClientIf(); spare != InvalidClientIf) {
                 g_client_if = spare;
@@ -619,10 +642,14 @@ namespace ams::ble {
             events::LogAddress("found controller", *out_address);
 
             if (log::IsEnabled()) {
-                SetSysBluetoothDevicesSettings settings;
+                SetSysBluetoothDevicesSettings settings = {};
                 Result info_rc = btdrvGetPairedDeviceInfo(*out_address, &settings);
-                log::Write("btdrvGetPairedDeviceInfo rc=0x%x key_present=%u key_type=%u device_type=%u",
-                    info_rc.GetValue(), settings.link_key_present, settings.key_type, settings.device_type);
+                if (R_SUCCEEDED(info_rc)) {
+                    log::Write("btdrvGetPairedDeviceInfo rc=0x0 key_present=%u key_type=%u device_type=%u",
+                        settings.link_key_present, settings.key_type, settings.device_type);
+                } else {
+                    log::Write("btdrvGetPairedDeviceInfo rc=0x%x (no valid metadata)", info_rc.GetValue());
+                }
             }
 
             R_SUCCEED();
@@ -666,13 +693,6 @@ namespace ams::ble {
             R_RETURN(rc);
         }
 
-        bool PairingBackoffActive() {
-            if (g_pairing_failed_tick == 0) {
-                return false;
-            }
-            return (os::GetSystemTick() - os::Tick(g_pairing_failed_tick)).ToTimeSpan() < PairingRetryBackoff;
-        }
-
         bool Adopt(bluetooth::Address *out_address, u32 *out_conn_id) {
             if (!events::TakeAdoptedConnection(out_address, out_conn_id)) {
                 return false;
@@ -689,6 +709,13 @@ namespace ams::ble {
         // The stack never pairs on its own: an authenticated request on an unbonded link just fails. Pairing is
         // Just Works and needs no confirmation from the controller.
         bool Pair(const bluetooth::Address &address) {
+            if (events::IsDisconnected() || !events::IsRadioEnabled()) {
+                return false;
+            }
+            // Discovery can already have produced this lifecycle event. Do not let that old flag satisfy the
+            // upcoming request; even a new event is only a heuristic, not proof that encryption succeeded.
+            static_cast<void>(events::TakeBondComplete());
+            log::Write("requesting LE bond; waiting for a new core lifecycle event");
             Result rc = btdrvCreateBond(address, BondTransport_Le);
             log::Write("btdrvCreateBond rc=0x%x", rc.GetValue());
             if (R_FAILED(rc)) {
@@ -707,7 +734,7 @@ namespace ams::ble {
                     // A refusal drops the link within a few hundred milliseconds of this event
                     events::Pump(TimeSpan::FromMilliSeconds(500));
                     if (!events::IsDisconnected()) {
-                        log::Write("paired");
+                        log::Write("bond lifecycle event observed; authentication not yet verified");
                         return true;
                     }
                     break;
@@ -756,7 +783,6 @@ namespace ams::ble {
                 g_present_tick = os::GetSystemTick().GetInt64Value();
             }
             controller::AttachVirtualController(controller);
-            g_pairing_failed_tick = 0;
             SaveRememberedDevice(address);
 
             // The pad only reports when something is touched, so its resting state (sticks centred, nothing
@@ -822,8 +848,13 @@ namespace ams::ble {
 
                 if (gatt::TakeRediscovered()) {
                     log::Write("services re-discovered, subscribing again");
-                    gatt::HidService hid;
-                    static_cast<void>(gatt::Subscribe(conn_id, &hid));
+                    gatt::HidService hid = {};
+                    const Result rc = gatt::Subscribe(conn_id, &hid);
+                    if (R_FAILED(rc)) {
+                        log::Write("re-subscription failed rc=0x%x", rc.GetValue());
+                        StopAfterSetupFailure("GATT rediscovery");
+                        return;
+                    }
                 }
 
                 if (events::IsDisconnected()) {
@@ -866,6 +897,12 @@ namespace ams::ble {
                     break;
                 }
 
+                if (g_setup_failed) {
+                    // Drain withheld events, but leave the radio alone. Shutdown still wakes/exits this loop.
+                    events::Pump(TimeSpan::FromMilliSeconds(250));
+                    continue;
+                }
+
                 bluetooth::Address address;
                 u32 conn_id = InvalidConnId;
 
@@ -874,8 +911,8 @@ namespace ams::ble {
                 // Any gamepad in pairing mode while the Controllers screen is open; only the remembered one,
                 // in short bursts, the rest of the time
                 bluetooth::Address remembered;
-                const bool in_window = events::IsPairingWindowOpen() && events::IsRadioEnabled() && !PairingBackoffActive();
-                const bool background = !in_window && !PairingBackoffActive() && BackgroundScanWanted() && GetRememberedDevice(&remembered);
+                const bool in_window = events::IsPairingWindowOpen() && events::IsRadioEnabled();
+                const bool background = !in_window && BackgroundScanWanted() && GetRememberedDevice(&remembered);
                 if (!connected && (in_window || background)) {
                     Result rc = in_window ? Scan(&address, TimeSpan::FromSeconds(10)) : Scan(&address, BackgroundScanDuration, &remembered);
                     if (Adopt(&address, &conn_id)) {
@@ -888,6 +925,9 @@ namespace ams::ble {
                             log::Write("this device was refused less than a minute ago, not reconnecting to it");
                         } else {
                             connected = R_SUCCEEDED(Connect(address, &conn_id, TimeSpan::FromSeconds(15)));
+                            if (!connected) {
+                                StopAfterSetupFailure("connect");
+                            }
                         }
                         if (!connected) {
                             Disconnect();
@@ -903,32 +943,41 @@ namespace ams::ble {
                 // Pairing traffic for this pad is answered on its behalf from here on
                 events::SetClaimedAddress(&address);
 
-                gatt::Discover(conn_id, address);
-
+                // Start the bond immediately, before this host requests discovery/MTU work. A Stadia-capable
+                // reference host starts security at link-up, not after GATT setup. Prepare the passive cache
+                // first so automatic discovery records delivered while Pair pumps events are not discarded.
+                diagnostics::BeginInputSession();
+                gatt::PrepareDiscovery(address);
+                log::Write("security-first setup: requesting bond before explicit GATT discovery/MTU");
                 if (!Pair(address)) {
-                    log::Write("backing off for %lds before trying to pair again", PairingRetryBackoff.GetSeconds());
+                    StopAfterSetupFailure("bond request");
                     Disconnect();
-                    RecycleRadio();
-                    // Set after the cycle, which clears it. Refusing to wait here meant a pad that will not
-                    // bond was retried - the radio crashed and brought back up each time - for as long as its
-                    // pairing button was held
-                    g_pairing_failed_tick = os::GetSystemTick().GetInt64Value();
                     os::SleepThread(TimeSpan::FromSeconds(1));
                     continue;
                 }
+
+                // Pair's lifecycle heuristic is still not encryption proof. The authenticated read below must
+                // complete successfully; neither the advertisement nor this ordering permits presentation.
+                gatt::Discover(conn_id, address);
 
                 // Hands the HID service to the stack's HID host layer for this link: its notifications, and the results
                 // of our requests on it, then arrive on the LE HID event stream
                 auto hid_uuid = MakeUuid16(GattServiceHid);
                 Result rc = btdrvRegisterGattHidDataPath(&hid_uuid);
                 log::Write("btdrvRegisterGattHidDataPath rc=0x%x", rc.GetValue());
+                if (R_FAILED(rc)) {
+                    StopAfterSetupFailure("HID data path");
+                    Disconnect();
+                    continue;
+                }
 
                 // The subscription is judged by the CCCD write's result; the pad only reports on input
                 events::ClearGattFailure();
                 gatt::HidService hid = {};
                 rc = gatt::Subscribe(conn_id, &hid);
                 if (R_FAILED(rc)) {
-                    log::Write("subscription failed rc=0x%x gatt_result=%u", rc.GetValue(), events::GetGattFailure());
+                    log::Write("subscription failed rc=0x%x last_recorded_gatt_error=%u (zero is not proof of completion)", rc.GetValue(), events::GetGattFailure());
+                    StopAfterSetupFailure("GATT setup");
                     Disconnect();
                     os::SleepThread(TimeSpan::FromSeconds(1));
                     continue;
@@ -980,6 +1029,7 @@ namespace ams::ble {
                         gatt::Dump("unrecognised device");
                         g_refused_address = address;
                         g_refused_tick = os::GetSystemTick().GetInt64Value();
+                        StopAfterSetupFailure("pad identification");
                         Disconnect();
                         os::SleepThread(TimeSpan::FromSeconds(1));
                         continue;
@@ -988,11 +1038,14 @@ namespace ams::ble {
                 }
 
                 if (!Present(conn_id, address, hid, policy)) {
+                    StopAfterSetupFailure("presentation");
                     Disconnect();
                     os::SleepThread(TimeSpan::FromSeconds(1));
                     continue;
                 }
                 RunConnected(conn_id);
+                // No SD writes from the notification thread or periodically while the test is running.
+                if (events::IsDisconnected() && events::IsRadioEnabled() && !events::IsShuttingDown()) diagnostics::DumpInputTiming();
 
                 // Nothing beyond the teardown is asked of the stack once the link is gone: removing the bond and
                 // detaching the HID host layer here were both tried and changed nothing. A radio cycle is the one

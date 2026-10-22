@@ -31,6 +31,7 @@
     AMS_SF_METHOD_INFO(C, H, 38,    Result, GetHidReportEventInfo,            (sf::OutCopyHandle out_handle),                                                           (out_handle),           hos::Version_7_0_0)                     \
     AMS_SF_METHOD_INFO(C, H, 46,    Result, InitializeBle,                    (sf::OutCopyHandle out_handle),                                                           (out_handle),           hos::Version_5_0_0)                     \
     AMS_SF_METHOD_INFO(C, H, 79,    Result, GetBleManagedEventInfo,           (sf::Out<ams::bluetooth::BleEventType> out_type, const sf::OutPointerBuffer &out_buffer), (out_type, out_buffer), hos::Version_5_1_0)                     \
+    AMS_SF_METHOD_INFO(C, H, 96,    Result, ObserveLeHidEventInfo,            (sf::Out<ams::bluetooth::BleEventType> out_type, const sf::OutPointerBuffer &out_buffer), (out_type, out_buffer), hos::Version_5_1_0)                     \
     AMS_SF_METHOD_INFO(C, H, 97,    Result, RegisterBleHidEvent,              (sf::OutCopyHandle out_handle),                                                           (out_handle),           hos::Version_5_1_0)                     \
     AMS_SF_METHOD_INFO(C, H, 36,    Result, RegisterHidReportEventDeprecated, (sf::OutCopyHandle out_handle),                                                           (out_handle),           hos::Version_1_0_0, hos::Version_3_0_2) \
     AMS_SF_METHOD_INFO(C, H, 37,    Result, GetHidReportEventInfoDeprecated1, (sf::Out<ams::bluetooth::HidEventType> out_type, const sf::OutPointerBuffer &out_buffer), (out_type, out_buffer), hos::Version_1_0_0, hos::Version_3_0_2) \
@@ -74,6 +75,7 @@ namespace ams::mitm::bluetooth {
             /* 5.0.0+ */
             Result InitializeBle(sf::OutCopyHandle out_handle);
             Result GetBleManagedEventInfo(sf::Out<ams::bluetooth::BleEventType> out_type, const sf::OutPointerBuffer &out_buffer);
+            Result ObserveLeHidEventInfo(sf::Out<ams::bluetooth::BleEventType> out_type, const sf::OutPointerBuffer &out_buffer);
             Result RegisterBleHidEvent(sf::OutCopyHandle out_handle);
 
             /* Deprecated */

@@ -3,12 +3,13 @@
 // tests/fixtures/stadia_advertisement_summary.txt; the report ids and sizes are from the captured HID report
 // map and a macOS Bluetooth LE capture of the same pad. No hardware is touched.
 #include "ble_advertisement.hpp"
-#include "ble_pad.hpp"
+#include "ble_pad_input.hpp"
 
 #include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
+#include <initializer_list>
 
 using namespace ams::ble;
 
@@ -143,6 +144,55 @@ namespace {
         assert(pad::PolicyFor(pad::Kind::None).kind == pad::Kind::None);
     }
 
+    void TestShouldersForControllerSlot() {
+        std::uint8_t stadia[10] = {8, 0, 0, 128, 128, 128, 128, 0, 0, 0};
+        assert(!pad::HasLrShoulders(pad::Kind::Stadia, stadia, sizeof(stadia)));
+        stadia[2] = 0x04; // L1: bit10 of the little-endian button word.
+        assert(!pad::HasLrShoulders(pad::Kind::Stadia, stadia, sizeof(stadia)));
+        stadia[2] = 0x02; // R1 alone.
+        assert(!pad::HasLrShoulders(pad::Kind::Stadia, stadia, sizeof(stadia)));
+        stadia[2] = 0x06; // L1+R1; these are SwitchL+R, not the analog triggers.
+        assert(pad::HasLrShoulders(pad::Kind::Stadia, stadia, sizeof(stadia)));
+        stadia[2] |= 0x08; // Additional held buttons must not hide the shoulder chord.
+        assert(pad::HasLrShoulders(pad::Kind::Stadia, stadia, sizeof(stadia)));
+        stadia[2] = 0;
+        stadia[7] = stadia[8] = 0xff;
+        assert(!pad::HasLrShoulders(pad::Kind::Stadia, stadia, sizeof(stadia)));
+        stadia[2] = 0x06;
+        for (std::size_t length = 0; length < sizeof(stadia); ++length) {
+            assert(!pad::HasLrShoulders(pad::Kind::Stadia, stadia, length));
+        }
+        std::uint8_t prefixed[11] = {0x03};
+        std::memcpy(prefixed + 1, stadia, sizeof(stadia));
+        assert(!pad::HasLrShoulders(pad::Kind::Stadia, prefixed, sizeof(prefixed)));
+        std::uint8_t oversized[16] = {};
+        std::memcpy(oversized, stadia, sizeof(stadia));
+        oversized[13] = 0xc0;
+        assert(!pad::HasLrShoulders(pad::Kind::Stadia, oversized, sizeof(oversized)));
+
+        std::uint8_t xbox[16] = {};
+        assert(!pad::HasLrShoulders(pad::Kind::Xbox, xbox, sizeof(xbox)));
+        xbox[13] = 0x40;
+        assert(!pad::HasLrShoulders(pad::Kind::Xbox, xbox, sizeof(xbox)));
+        xbox[13] = 0x80;
+        assert(!pad::HasLrShoulders(pad::Kind::Xbox, xbox, sizeof(xbox)));
+        xbox[13] = 0xc0;
+        assert(pad::HasLrShoulders(pad::Kind::Xbox, xbox, sizeof(xbox)));
+        assert(pad::HasLrShoulders(pad::Kind::Xbox, xbox, 15));
+        assert(!pad::HasLrShoulders(pad::Kind::Xbox, xbox, 14));
+        for (std::size_t length = 0; length < 14; ++length) {
+            assert(!pad::HasLrShoulders(pad::Kind::Xbox, xbox, length));
+        }
+        std::uint8_t xbox_oversized[17] = {};
+        xbox_oversized[13] = 0xc0;
+        assert(!pad::HasLrShoulders(pad::Kind::Xbox, xbox_oversized, sizeof(xbox_oversized)));
+        assert(!pad::HasLrShoulders(pad::Kind::None, xbox, sizeof(xbox)));
+        assert(!pad::HasLrShoulders(pad::Kind::None, stadia, sizeof(stadia)));
+        for (const auto kind : {pad::Kind::None, pad::Kind::Xbox, pad::Kind::Stadia}) {
+            assert(!pad::HasLrShoulders(kind, nullptr, 16));
+        }
+    }
+
     void TestNameMatching() {
         adv::Summary summary;
         adv::Reset(&summary);
@@ -165,6 +215,7 @@ int main() {
     TestUnknownGamepadIsNotGuessedAt();
     TestMalformedRecords();
     TestIdentification();
+    TestShouldersForControllerSlot();
     TestNameMatching();
 
     std::printf("BLE pad identification: captured Stadia/Xbox advertisements, malformed records, endpoint fingerprints and refusal-to-guess passed\n");

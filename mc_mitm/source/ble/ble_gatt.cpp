@@ -17,6 +17,8 @@
 #include "ble_results.hpp"
 #include "ble_events.hpp"
 #include "ble_log.hpp"
+#include "ble_gatt_read.hpp"
+#include "ble_diagnostics.hpp"
 #include "../bluetooth_mitm/bluetooth/hid_report_layout.hpp"
 
 namespace ams::ble::gatt {
@@ -40,17 +42,20 @@ namespace ams::ble::gatt {
         // the LE HID thread, while the host thread waits. One read is in flight at a time: the host already
         // serialises its GATT requests, and two Report characteristics share a uuid, so a read answered out of
         // order could not be matched to the characteristic it asked for anyway.
-        constexpr TimeSpan ReadTimeout = TimeSpan::FromSeconds(3);
+        // The old ten-second allowance cut off observation before the protocol's thirty-second SMP/ATT
+        // timeouts. ReadDeadline keeps the same one request pending for a bounded thirty-five seconds.
+        // A timeout is never permission to issue the next request on a possibly busy/security-blocked link.
         constexpr size_t MaxReadSize = 0x200;   // the notification buffer the stack delivers values in
 
         os::SdkMutex g_read_lock;
-        bool g_read_pending = false;
-        u32 g_read_conn_id = 0;
-        u16 g_read_uuid = 0;
-        bool g_read_answered = false;
-        bool g_read_failed = false;
-        size_t g_read_size = 0;
+        ReadState g_read;
         u8 g_read_data[MaxReadSize];
+
+        // The authenticated report-map read is also the identification read. Do not ask for it a second time
+        // after subscribing. Written/read only by the host thread; reset for every Subscribe invocation.
+        u8 g_report_map[MaxReadSize];
+        size_t g_report_map_size = 0;
+        u32 g_report_map_connection = InvalidConnId;
 
         // Around 1.6 KiB: kept in module storage rather than on a stack, as hid_report_layout.hpp asks.
         bluetooth::hogp::ReportLayout g_layout;
@@ -107,6 +112,17 @@ namespace ams::ble::gatt {
     }
 
     void OnEvent(const EventRecord &e) {
+        if (e.type == BtdrvBleEventType_ClientNotify) {
+            diagnostics::Note(diagnostics::Metric::ManagedNotifyType);
+        }
+        // Firmware may deliver a read completion on the managed stream rather than the HID stream. Pump()
+        // dispatches this sink while the host waits; do not strand a valid completion in the event ring.
+        if ((e.type == BtdrvBleEventType_ClientNotify) && (e.info.client_notify.conn_id == events::GetConnection())) {
+            log::Write("GATT completion source=managed");
+            OnClientNotify(e);
+            events::NoteGattResult(e.info.client_notify.result);
+            return;
+        }
         if ((e.type != BtdrvBleEventType_ClientCacheSave) || (e.info.client_cache_save.conn_id != events::GetConnection())) {
             return;
         }
@@ -130,21 +146,24 @@ namespace ams::ble::gatt {
         }
     }
 
-    void Discover(u32 conn_id, const bluetooth::Address &address) {
+    void PrepareDiscovery(const bluetooth::Address &address) {
+        // Host-thread only, once per new link and before Pair pumps the event sink. Never carry the previous
+        // link's attribute table into a security-first setup, even when reconnecting to the same address.
         g_discovery_complete = false;
         g_rediscovered = false;
         g_replace_pending = true;
         g_table_overflowed = false;
-
-        const bool reuse = (g_table.count > 0) && AddressEqual(g_table.address, address);
-        if (!reuse) {
-            g_table.count = 0;
-        }
+        g_table.count = 0;
         g_table.address = address;
+    }
 
-        // The stack runs discovery on its own shortly after connecting (its first cache report arrives within a
-        // second); wait for that rather than a fixed two seconds, then let the remaining reports trail in
-        events::WaitFor(BtdrvBleEventType_ClientCacheSave, TimeSpan::FromSeconds(2), nullptr, [&](const EventRecord &r) { return r.info.client_cache_save.conn_id == conn_id; });
+    void Discover(u32 conn_id, const bluetooth::Address &address) {
+        // The driver also discovers automatically. Pair may already have delivered this connection's cache;
+        // keep it instead of resetting the table or waiting for a first record that has already been consumed.
+        const bool cached_during_bond = (g_table.count > 0) && AddressEqual(g_table.address, address);
+        if (!cached_during_bond) {
+            events::WaitFor(BtdrvBleEventType_ClientCacheSave, TimeSpan::FromSeconds(2), nullptr, [&](const EventRecord &r) { return r.info.client_cache_save.conn_id == conn_id; });
+        }
         events::Pump(TimeSpan::FromMilliSeconds(400));
 
         Result rc = btdrvGetGattAttribute(address, conn_id);
@@ -159,7 +178,7 @@ namespace ams::ble::gatt {
 
         g_discovery_complete = true;
         g_replace_pending = false;
-        log::Write("attribute table holds %u entries%s", g_table.count, reuse ? " (kept from previous connection)" : "");
+        log::Write("attribute table holds %u entries%s", g_table.count, cached_during_bond ? " (received during bond phase)" : "");
     }
 
     bool TakeRediscovered() {
@@ -169,6 +188,8 @@ namespace ams::ble::gatt {
     }
 
     Result Subscribe(u32 conn_id, HidService *out) {
+        g_report_map_size = 0;
+        g_report_map_connection = InvalidConnId;
         if (g_table_overflowed) {
             log::Write("attribute table was truncated, not subscribing to handles we may have misread");
             R_THROW(svc::ResultNotSupported());
@@ -199,21 +220,17 @@ namespace ams::ble::gatt {
             R_UNLESS(!events::IsDisconnected(), ResultNoConnection());
 
             if (IsUuid16(attr.id.uuid, GattCharHidInformation) || IsUuid16(attr.id.uuid, GattCharReportMap)) {
-                const u32 results = events::GetGattResultCount();
-                Result rc;
-                for (int attempt = 0; ; ++attempt) {
-                    rc = btdrvReadGattCharacteristic(conn_id, service.is_primary, &service.id, &attr.id, BtdrvGattAuthReqType_NoMitm);
-                    log::Write("btdrvReadGattCharacteristic handle=0x%04x rc=0x%x", attr.handle, rc.GetValue());
-                    // Refused locally while the pad's connection parameter update is in flight; it clears within a second or two
-                    if (!ResultInsufficientAuthentication::Includes(rc) || (attempt >= 4) || events::IsDisconnected()) {
-                        break;
-                    }
-                    events::Pump(TimeSpan::FromSeconds(1));
-                }
-                R_TRY(rc);
-                // The first authenticated read may carry a whole Just Works pairing before it completes
-                if (!events::WaitForGattResult(results, TimeSpan::FromSeconds(10))) {
-                    events::Pump(TimeSpan::FromMilliSeconds(500));
+                const bool is_map = IsUuid16(attr.id.uuid, GattCharReportMap);
+                const u16 uuid = is_map ? GattCharReportMap : GattCharHidInformation;
+                u8 information[MaxReadSize];
+                size_t size = 0;
+                // An accepted IPC request is not a completed ATT read. In particular, the first bench run
+                // timed out here and then issued another read, which the stack refused. Stop at that first
+                // failure instead of guessing what the numeric refusal meant or retrying it on the radio.
+                R_TRY(Read(conn_id, *out, uuid, is_map ? g_report_map : information, MaxReadSize, &size));
+                if (is_map) {
+                    g_report_map_size = size;
+                    g_report_map_connection = conn_id;
                 }
             }
         }
@@ -264,23 +281,13 @@ namespace ams::ble::gatt {
         const auto &notify = e.info.client_notify;
 
         std::scoped_lock lk(g_read_lock);
-        if (!g_read_pending || (e.info.client_notify.conn_id != g_read_conn_id) || !IsUuid16(notify.char_uuid, g_read_uuid)) {
+        if (!IsUuid16(notify.char_uuid, g_read.uuid) ||
+            !g_read.Accept(notify.conn_id, g_read.uuid, notify.result, notify.size, sizeof(g_read_data))) {
             return;
         }
 
-        // A record carrying neither a value nor an error is the acknowledgement of something else, not the
-        // answer to the read; keep waiting for the one that matters.
-        if ((notify.size == 0) && (notify.result == 0)) {
-            return;
-        }
-
-        g_read_answered = true;
-        g_read_failed = notify.result != 0;
-        g_read_size = std::min<size_t>(notify.size, sizeof(g_read_data));
-        std::memcpy(g_read_data, notify.data, g_read_size);
-        if (notify.result != 0) {
-            log::Write("read uuid=%04x answered with error %u", g_read_uuid, notify.result);
-        }
+        std::memcpy(g_read_data, notify.data, g_read.size);
+        log::Write("read uuid=%04x completed result=%u size=%u valid=%u", g_read.uuid, notify.result, notify.size, !g_read.failed);
     }
 
     Result Read(u32 conn_id, const HidService &hid, u16 uuid16, void *out, size_t out_size, size_t *out_len) {
@@ -289,32 +296,28 @@ namespace ams::ble::gatt {
 
         {
             std::scoped_lock lk(g_read_lock);
-            g_read_pending = true;
-            g_read_conn_id = conn_id;
-            g_read_uuid = uuid16;
-            g_read_answered = false;
-            g_read_failed = false;
-            g_read_size = 0;
+            R_UNLESS(g_read.Begin(conn_id, uuid16), svc::ResultNotSupported());
         }
 
+        diagnostics::Dump("read-begin");
         const Result rc = btdrvReadGattCharacteristic(conn_id, hid.service.is_primary, &hid.service.id, &characteristic->id, BtdrvGattAuthReqType_NoMitm);
-        log::Write("btdrvReadGattCharacteristic uuid=%04x handle=0x%04x rc=0x%x", uuid16, characteristic->handle, rc.GetValue());
+        log::Write("btdrvReadGattCharacteristic uuid=%04x handle=0x%04x rc=0x%x wait_ms=%lld", uuid16, characteristic->handle, rc.GetValue(), static_cast<long long>(ReadTimeoutMilliseconds));
         if (R_FAILED(rc)) {
             std::scoped_lock lk(g_read_lock);
-            g_read_pending = false;
+            g_read.Finish();
             R_THROW(rc);
         }
 
-        const auto deadline = os::GetSystemTick().ToTimeSpan() + ReadTimeout;
+        const ReadDeadline deadline(os::GetSystemTick().ToTimeSpan().GetMilliSeconds());
         for (;;) {
             {
                 std::scoped_lock lk(g_read_lock);
-                if (g_read_answered) {
-                    g_read_pending = false;
-                    R_UNLESS(!g_read_failed, svc::ResultNotFound());
-                    R_UNLESS(g_read_size > 0, svc::ResultNotFound());
+                if (g_read.answered) {
+                    g_read.Finish();
+                    R_UNLESS(!g_read.failed, svc::ResultNotFound());
+                    R_UNLESS(g_read.size <= out_size, svc::ResultNotSupported());
 
-                    const size_t copied = std::min(g_read_size, out_size);
+                    const size_t copied = g_read.size;
                     std::memcpy(out, g_read_data, copied);
                     if (out_len) {
                         *out_len = copied;
@@ -325,21 +328,24 @@ namespace ams::ble::gatt {
 
             // The system switched BLE off while we were waiting: nothing else may be asked of the radio, and
             // every answer to it has just been lost
-            if (!events::IsRadioEnabled()) {
+            if (!events::IsRadioEnabled() || events::IsDisconnected() || events::IsShuttingDown()) {
                 break;
             }
 
-            if (os::GetSystemTick().ToTimeSpan() >= deadline) {
+            if (deadline.Expired(os::GetSystemTick().ToTimeSpan().GetMilliSeconds())) {
                 break;
             }
-            os::SleepThread(TimeSpan::FromMilliSeconds(20));
+            // Dispatch managed-stream completions too, not just the separate LE HID listener.
+            events::Pump(TimeSpan::FromMilliSeconds(20));
         }
 
         {
             std::scoped_lock lk(g_read_lock);
-            g_read_pending = false;
+            g_read.Finish();
         }
-        log::Write("read uuid=%04x timed out", uuid16);
+        diagnostics::Dump("read-incomplete");
+        log::Write("read uuid=%04x incomplete: radio=%u disconnected=%u; no next GATT request", uuid16,
+            events::IsRadioEnabled(), events::IsDisconnected());
         R_THROW(svc::ResultTimedOut());
     }
 
@@ -348,9 +354,9 @@ namespace ams::ble::gatt {
         out->has_protocol_mode = FindCharacteristicIn(hid.service, GattCharProtocolMode) != nullptr;
         out->has_hid_control_point = FindCharacteristicIn(hid.service, GattCharHidControlPoint) != nullptr;
 
-        u8 map[MaxReadSize];
-        size_t map_size = 0;
-        R_TRY(Read(conn_id, hid, GattCharReportMap, map, sizeof(map), &map_size));
+        R_UNLESS((g_report_map_connection == conn_id) && (g_report_map_size > 0), svc::ResultNotFound());
+        const auto &map = g_report_map;
+        const size_t map_size = g_report_map_size;
 
         // A map exactly the size of the buffer has almost certainly been cut short, and a pad identified from
         // the prefix of its own report map is worse than one not identified at all

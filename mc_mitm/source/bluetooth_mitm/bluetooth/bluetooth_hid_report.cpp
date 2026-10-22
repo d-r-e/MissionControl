@@ -18,6 +18,7 @@
 #include "../btdrv_shim.h"
 #include "../btdrv_mitm_flags.hpp"
 #include "../../controllers/controller_management.hpp"
+#include "../../ble/ble_diagnostics.hpp"
 
 namespace ams::bluetooth::hid::report {
 
@@ -159,7 +160,11 @@ namespace ams::bluetooth::hid::report {
             std::memcpy(g_fake_report_event_info.data_report.v7.report.data, report_buffer, size);
         }
 
-        g_fake_buffer->Write(hos::GetVersion() >= hos::Version_12_0_0 ? BtdrvHidEventType_Data : BtdrvHidEventTypeOld_Data, &g_fake_report_event_info, size + 0x11);
+        const auto timing_start = ams::ble::diagnostics::InputNowUs();
+        const auto free_bytes = timing_start ? g_fake_buffer->GetWriteableSize() : 0;
+        const Result write_result = g_fake_buffer->Write(hos::GetVersion() >= hos::Version_12_0_0 ? BtdrvHidEventType_Data : BtdrvHidEventTypeOld_Data, &g_fake_report_event_info, size + 0x11);
+        ams::ble::diagnostics::RecordFifoWrite(timing_start, free_bytes, R_SUCCEEDED(write_result));
+        // Preserve existing signaling/error semantics; the diagnostic observes, never drains or drops packets.
         g_system_event_fwd.Signal();
     }
 

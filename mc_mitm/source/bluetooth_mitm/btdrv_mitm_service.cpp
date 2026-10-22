@@ -25,6 +25,7 @@
 #include "../ble/ble_events.hpp"
 #include "../ble/ble_hid_host.hpp"
 #include "../ble/ble_log.hpp"
+#include "../ble/ble_diagnostics.hpp"
 #include <switch.h>
 
 namespace ams::mitm::bluetooth {
@@ -192,6 +193,18 @@ namespace ams::mitm::bluetooth {
 
     }
 
+    Result BtdrvMitmService::ObserveLeHidEventInfo(sf::Out<ams::bluetooth::BleEventType> out_type, const sf::OutPointerBuffer &out_buffer) {
+        AMS_UNUSED(out_type, out_buffer);
+        // Count the request, not its response: forward the original IPC unchanged. Never read the real
+        // single slot here, inspect its payload, or perform SD I/O while servicing the system client.
+        if (m_client_info.program_id == ncm::SystemProgramId::Hid) {
+            ams::ble::diagnostics::Note(ams::ble::diagnostics::Metric::HidSlotRead);
+        } else if (m_client_info.program_id == ncm::SystemProgramId::Btm) {
+            ams::ble::diagnostics::Note(ams::ble::diagnostics::Metric::BtmSlotRead);
+        }
+        R_THROW(sm::mitm::ResultShouldForwardToSession());
+    }
+
     Result BtdrvMitmService::RegisterBleHidEvent(sf::OutCopyHandle out_handle) {
         // hid consumes the LE HID event stream itself, and since the event info is a single slot that resets on
         // read, it wins most of the notifications from a controller we present to it and drops them as garbage.
@@ -201,6 +214,11 @@ namespace ams::mitm::bluetooth {
             R_THROW(sm::mitm::ResultShouldForwardToSession());
         }
 
+        if (m_client_info.program_id == ncm::SystemProgramId::Hid) {
+            ams::ble::diagnostics::Note(ams::ble::diagnostics::Metric::HidPlaceholder);
+        } else if (m_client_info.program_id == ncm::SystemProgramId::Btm) {
+            ams::ble::diagnostics::Note(ams::ble::diagnostics::Metric::BtmPlaceholder);
+        }
         out_handle.SetValue(g_le_hid_placeholder_event.GetReadableHandle(), false);
         R_SUCCEED();
     }

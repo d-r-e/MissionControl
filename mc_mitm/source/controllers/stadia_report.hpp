@@ -19,8 +19,10 @@ namespace ams::controller {
             Capture   = 1u << 0,
             Assistant = 1u << 1,
             Home      = 1u << 4,
-            Options   = 1u << 5,
-            Menu      = 1u << 6,
+            // Left three dots = Back/Minus; right three lines = Start/Plus.
+            // The initial timed-capture labels for these two buttons were reversed.
+            Options   = 1u << 6,
+            Menu      = 1u << 5,
             R3        = 1u << 7,
             L3        = 1u << 8,
             R1        = 1u << 9,

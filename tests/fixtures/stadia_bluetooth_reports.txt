@@ -1,6 +1,8 @@
 # Real macOS Bluetooth Low Energy IOHID capture, Stadia 18d1:9400.
 # Labels for axes are based on byte offsets, not timed prompts (left-stick movement was delayed).
 # name ID-prefixed-hex; no identifiers or timestamps.
+# Central-button labels corrected from initial timed prompts using SDL and operator validation:
+# 0x40 = left three dots (Options/Back), 0x20 = right three lines (Menu/Start). Raw bytes unchanged.
 neutral 0308000080808080000000
 a 0308004080808080000000
 b 0308002080808080000000
@@ -14,8 +16,8 @@ l1 0308000480808080000000
 r1 0308000280808080000000
 l3 0308000180808080000000
 r3 0308800080808080000000
-menu 0308400080808080000000
-options 0308200080808080000000
+options 0308400080808080000000
+menu 0308200080808080000000
 assistant 0308020080808080000000
 capture 0308010080808080000000
 home 0308100080808080000000

@@ -25,7 +25,7 @@ int main(int argc, char **argv) {
     const std::map<std::string, std::uint16_t> expected_buttons = {
         {"a", 0x4000}, {"b", 0x2000}, {"x", 0x1000}, {"y", 0x0800},
         {"l1", 0x0400}, {"r1", 0x0200}, {"l3", 0x0100}, {"r3", 0x0080},
-        {"menu", 0x0040}, {"options", 0x0020}, {"home", 0x0010},
+        {"menu", 0x0020}, {"options", 0x0040}, {"home", 0x0010},
         {"assistant", 0x0002}, {"capture", 0x0001}
     };
     const std::map<std::string, std::uint8_t> expected_hats = {
@@ -66,6 +66,8 @@ int main(int argc, char **argv) {
         } else if (expected_buttons.contains(name)) {
             assert(report.buttons == expected_buttons.at(name));
             assert(report.IsPressed(button_names.at(name)));
+            if (name == "menu") assert(!report.IsPressed(StadiaInputReport::Options));
+            if (name == "options") assert(!report.IsPressed(StadiaInputReport::Menu));
             assert(report.dpad == 8);
         } else if (expected_hats.contains(name)) {
             assert(report.dpad == expected_hats.at(name));
