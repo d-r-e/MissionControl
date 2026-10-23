@@ -99,10 +99,11 @@ namespace ams::ble::events {
 
     // Drains the queue until an event of the requested type satisfying pred arrives or the timeout expires.
     // Every event seen is logged and applied to the sink. InvalidType matches any type.
-    constexpr bluetooth::BleEventType InvalidType = static_cast<bluetooth::BleEventType>(0xFFFF);
+    // This is an internal filter sentinel, not a valid SDK event enum value.
+    constexpr u32 InvalidType = 0xFFFF;
 
     template<typename F>
-    bool WaitFor(bluetooth::BleEventType want, TimeSpan timeout, EventRecord *out, F pred) {
+    bool WaitFor(u32 want, TimeSpan timeout, EventRecord *out, F pred) {
         static EventRecord s_record;
 
         const auto deadline = os::GetSystemTick().ToTimeSpan() + timeout;

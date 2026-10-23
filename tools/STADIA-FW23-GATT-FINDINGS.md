@@ -6,8 +6,79 @@
   verified against all31 receipt-manifest file hashes without overwriting the working tree.
 - `48ba734`: subsequent production-cache extraction and behavioral tests, NOT deployed.
   Full portable suite/pinned target build passed; NPDM identical to the installed baseline.
-  Existing duplicate accumulation and same-ID stale-event limitations remain unchanged.
+  Duplicate accumulation and same-ID stale-event limitations were unchanged in that checkpoint.
 
+## Offline integration checkpoint (NOT deployed)
+
+- `tests/ble_gatt_runtime_tests.cpp` compiles actual production GATT code, event-pump templates,
+  the report-map parser and the real GATT-result wait. SDK declarations/prototypes are generated
+  verbatim from pinned libnx. Host post-Pair setup, rediscovery branch, failure latch and retry
+  gate are source-extracted, not reimplemented. Only clock/OS wrappers, queue and driver calls
+  are mocked; this is NOT the complete host, Pair, firmware event ownership or real IPC.
+- Runtime injection covers cache invalidation before discovery, during MTU wait, pending reads
+  and CCCD waits; same-pump invalidation plus successful completion cannot publish read output.
+  Tests assert pending-read cleanup, no next setup request, failure latch/disconnect and no setup
+  retry. Wrong/duplicate/late notifications, timeouts, disconnect/radio-off/shutdown, read errors,
+  notification/CCCD IPC failures and asynchronous CCCD errors are also exercised.
+- Descriptor bindings are now preflighted before ATT reads/writes: selected service must exist,
+  have positive bounds and no genuine overlapping service. A CCCD must have one owner in that
+  same service, chosen by handle rather than array order. Ambiguous CCCDs and missing bindings
+  fail setup, rather than borrowing a descriptor across a service boundary. Included-service
+  rows remain references, not enclosing owners. Shuffled/adjacent/nested/overlap/intervening-
+  characteristic/boundary fixtures exercise the production lookup.
+- Notification registration IPC failure now stops before a CCCD write. The internal event-filter
+  sentinel is `u32`, not an out-of-range SDK enum value; this fixes Clang's constant-expression
+  rejection/enum undefined behavior without changing native event types or withholding logic.
+- Cancellation now wins over a read answer delivered in the same event pump. Live-link checks
+  precede GATT requests and copy-out; cancellation after `Begin` but before IPC finishes the pending
+  read. Regression cases include successful replies plus radio-off/disconnect/shutdown, power
+  changes during read diagnostics or notification registration, and unavailable-link entry guards.
+  A check-to-use window between an observed flag and IPC remains; this is not a whole-power-system
+  atomicity claim. Independent cancellation review `c865c023-af4e-443` found no blocker.
+- Full ASan/UBSan suite and pinned Switch build pass. Nine guard-removal mutations are rejected
+  by executable assertions (compile failures do not count). Independent review
+  `3fff7635-1e46-4d0` found no new blocker; its asynchronous CCCD error coverage gap was then
+  filled and the full suite rerun. Discovery/MTU IPC error propagation remains inherited
+  log-and-continue behavior, outside the coverage claim.
+- Latest candidate:244094B, SHA256
+  `b93da01bab8b6dce1a8c3b09c69147135162254bf46c810ceef8a5616846e71e`.
+  NPDM/capabilities/service ACLs are byte-identical to installed diagnostic5ed1417e; growth2045B.
+  Candidate/source manifest/test/build/comparison/mutation evidence is preserved under
+  `~/.cache/missioncontrol/ble-bench-20261021/local-gatt-integration-b93da01bab8b/`.
+- Not established: native discovery completeness or omitted intermediate characteristics,
+  recycled-ID old callbacks versus a new read, durable bonds/ordinary reconnect, physical latency,
+  lifecycle/coexistence or Xbox regression. The console/module/config/tester remain unchanged;
+  deployment requires fresh FTP readiness. See `tests/gatt-runtime-stubs/README.md` for scope.
+
+## Earlier local follow-up: transactional cache hardening (NOT deployed)
+
+- Exact semantic replays are idempotent, including a full64-entry table. Equality ignores SDK
+  padding, inactive UUID bytes and documented type-inapplicable property/primary fields;
+  `group_end_handle` remains conservatively compared. Native enum and wire-layout assertions
+  bind the SDK-free tests to the pinned SDK. UUID sizes must be2/4/16; unknown types, handle0
+  and reversed service ranges are rejected. The existing ten-slot/physical-array count clamp remains.
+- Preflight checks the whole bounded batch before changing the table. Conflicting same-handle
+  definitions, malformed attributes, nonzero cache status and capacity overflow latch a failure
+  until `PrepareDiscovery`. No valid-looking prefix is published after a bad batch tail.
+- Empty/exact post-completion replays do not trigger rediscovery. Genuinely new post-completion
+  data invalidates the cache and takes the existing failure/teardown path: there is no native
+  end-of-rediscovery marker permitting safe subscription from a partial replacement table.
+- `Discover` now returns a checked result before HID-path registration. Reads/subscription waits
+  recheck invalidity after pumping events; an invalidated pending read finishes without publishing
+  its result or starting the next request. No radio/authentication/output/priority parameters change.
+- Full ASan/UBSan portable suite, pinned Switch build and NPDM/artifact comparison passed.
+  Independent review `07366b32-8b48-442` found no definite blocker. Tests retain the old literal
+  append oracle for healthy unique discovery and add a separate map/key reference for50,000 mixed
+  events. Source guards and matching host/target layout assertions were strengthened afterward;
+  full suite/build/comparison passed again.
+- Local candidate:242605B, SHA256
+  `6b861735fe0c6514d95698aa10c3db1e5fa75b178711d9cddeef0ae71105edbf`;
+  NPDM is byte-identical to installed diagnostic5ed1417e (candidate grows556B).
+  Evidence bundle (candidate, source snapshots/manifest and test/build/comparison logs):
+  `~/.cache/missioncontrol/ble-bench-20261021/local-cache-hardening-6b861735fe0c/`.
+- Remaining: mocked event-pump/read integration, descriptor service containment, firmware cache
+  completeness and indistinguishable queued records with recycled connection IDs. This does NOT
+  establish normal reconnect, durable bonds or end-to-end latency. The console remains unchanged.
 
 ## Current: operator-approved latency diagnostic installed; auto-start re-enabled
 

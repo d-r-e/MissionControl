@@ -58,6 +58,14 @@ trap 'rm -rf "$build"' EXIT
     -I "$root/mc_mitm/source/ble" \
     "$root/tests/ble_gatt_cache_tests.cpp" -o "$build/ble-gatt-cache-tests"
 "$build/ble-gatt-cache-tests"
+# Real production GATT translation unit and event pumps; host-only SDK/clock/IPC boundaries.
+python3 "$root/tools/prepare-gatt-runtime-tests.py" "$build/gatt-runtime"
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
+    -fsanitize=address,undefined -fno-omit-frame-pointer -g \
+    -I "$root/tests/gatt-runtime-stubs" -I "$build/gatt-runtime" \
+    -I "$root/lib/libnx/nx/include" \
+    "$root/tests/ble_gatt_runtime_tests.cpp" -o "$build/ble-gatt-runtime-tests"
+"$build/ble-gatt-runtime-tests"
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic -pthread \
     -fsanitize=address,undefined -fno-omit-frame-pointer -g \
     -I "$root/mc_mitm/source/ble" \

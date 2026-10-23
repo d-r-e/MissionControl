@@ -958,12 +958,17 @@ namespace ams::ble {
 
                 // Pair's lifecycle heuristic is still not encryption proof. The authenticated read below must
                 // complete successfully; neither the advertisement nor this ordering permits presentation.
-                gatt::Discover(conn_id, address);
+                Result rc = gatt::Discover(conn_id, address);
+                if (R_FAILED(rc)) {
+                    StopAfterSetupFailure("GATT discovery cache");
+                    Disconnect();
+                    continue;
+                }
 
                 // Hands the HID service to the stack's HID host layer for this link: its notifications, and the results
                 // of our requests on it, then arrive on the LE HID event stream
                 auto hid_uuid = MakeUuid16(GattServiceHid);
-                Result rc = btdrvRegisterGattHidDataPath(&hid_uuid);
+                rc = btdrvRegisterGattHidDataPath(&hid_uuid);
                 log::Write("btdrvRegisterGattHidDataPath rc=0x%x", rc.GetValue());
                 if (R_FAILED(rc)) {
                     StopAfterSetupFailure("HID data path");

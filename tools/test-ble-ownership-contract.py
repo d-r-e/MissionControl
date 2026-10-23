@@ -115,13 +115,15 @@ class OwnershipContracts(unittest.TestCase):
         self.assertEqual(offsets, sorted(offsets))
         self.assertEqual(host.count("Pair(address)"), 1)
         self.assertEqual(host.count("gatt::PrepareDiscovery(address)"), 1)
+        # The extracted retry gate must precede connection attempts in the full host as well.
+        self.assertLess(host.index("if (g_setup_failed)"), host.index("Connect(address,"))
         prepare = body(source("ble/ble_gatt.cpp"), "void PrepareDiscovery(")
         self.assertIn("g_cache.Prepare(g_table, address);", prepare)
         self.assertNotIn("btdrv", prepare)
         cache = source("ble/ble_gatt_cache.hpp")
         self.assertIn("table.count = 0;", body(cache, "void Prepare("))
         self.assertIn("table.address = address;", body(cache, "void Prepare("))
-        discover = body(source("ble/ble_gatt.cpp"), "void Discover(")
+        discover = body(source("ble/ble_gatt.cpp"), "Result Discover(")
         self.assertIn("if (!cached_during_bond)", discover)
         self.assertNotIn("g_table.count = 0", discover)
         self.assertNotIn("g_replace_pending = true", discover)
@@ -130,7 +132,16 @@ class OwnershipContracts(unittest.TestCase):
         self.assertIn("g_cache.Append(g_table, e.info.client_cache_save.conn_id, events::GetConnection(),", sink)
         self.assertIn("g_cache.Complete();", discover)
         subscribe = body(source("ble/ble_gatt.cpp"), "Result Subscribe(")
-        self.assertIn("if (g_cache.Overflowed())", subscribe)
+        self.assertIn("if (g_cache.Unusable())", subscribe)
+        setup = host[host.index("Result rc = gatt::Discover("):]
+        guard = body(setup, "if (R_FAILED(rc))")
+        self.assertLess(setup.index("if (R_FAILED(rc))"), setup.index("btdrvRegisterGattHidDataPath("))
+        self.assertIn('StopAfterSetupFailure("GATT discovery cache")', guard)
+        self.assertIn("Disconnect();", guard)
+        self.assertIn("continue;", guard)
+        self.assertIn("e.info.client_cache_save.result", sink)
+        self.assertGreaterEqual(subscribe.count("!g_cache.Unusable()"), 4)
+        self.assertIn("if (g_cache.Unusable() || !CanRequestGatt(conn_id)) break;", body(source("ble/ble_gatt.cpp"), "Result Read("))
 
     def test_listener_and_read_do_not_add_requests(self):
         listener = body(source("ble/ble_hid_host.cpp"), "void LeHidThreadFunc(")
@@ -141,9 +152,10 @@ class OwnershipContracts(unittest.TestCase):
         self.assertIn("BtdrvGattAuthReqType_NoMitm", read)
         self.assertIn("const ReadDeadline deadline(", read)
         self.assertIn("if (deadline.Expired(", read)
-        self.assertIn("events::IsRadioEnabled()", read)
-        self.assertIn("events::IsDisconnected()", read)
-        self.assertIn("events::IsShuttingDown()", read)
+        self.assertIn("CanRequestGatt(conn_id)", read)
+        available = body(source("ble/ble_gatt.cpp"), "bool CanRequestGatt(")
+        for check in ["events::IsRadioEnabled()", "events::IsDisconnected()", "events::IsShuttingDown()", "events::GetConnection() == conn_id"]:
+            self.assertIn(check, available)
         self.assertIn('diagnostics::Dump("read-begin")', read)
         self.assertIn('diagnostics::Dump("read-incomplete")', read)
 

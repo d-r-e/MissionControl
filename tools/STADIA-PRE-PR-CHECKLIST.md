@@ -133,11 +133,20 @@ attempts or disable/enable BLE around sleep.
 - [ ] A02 Add behavioral tests around the PRODUCTION GATT discovery/cache implementation:
   prepare before pairing; fragments received during pairing; duplicate/replayed batches;
   overflow/incomplete discovery; pre-preparation/foreign/stale events; same-address reconnect;
-  recycled connection IDs and generation boundaries. The extracted production algorithm now
-  has portable fragmentation/filter/reset/bounds/overflow/rediscovery and duplicate-characterization
-  tests. These do not prove firmware event ownership, deduplication or generation-safe callbacks.
+  recycled connection IDs and generation boundaries. Local production-helper tests now cover
+  semantic duplicate replay, transactional conflict/overflow rejection, driver errors and late
+  post-completion changes, plus 50,000 events against an independent reference model. Runtime
+  tests compile real production GATT/event-pump code and source-extracted post-Pair host setup,
+  rediscovery and retry blocks. Injected discovery/read/CCCD invalidation checks pending cleanup,
+  unchanged copy-out, no subsequent setup request and host latch/disconnect; nine temporary-source
+  guard-removal mutations fail the tests. Descriptor preflight requires unique same-service
+  ownership and rejects overlapping services/ambiguous CCCDs. This is not a whole-host/firmware
+  test. Native completeness, omitted intermediate characteristics, pre-preparation/queued events
+  and same-ID/generation-safe callbacks remain unproven.
 - [ ] A03 Test the complete in-flight read lifecycle across timeout/disconnect/radio-off/shutdown,
-  then a new same-connection/UUID request and an old callback. Helper tests do not prove integration.
+  then a new same-connection/UUID request and an old callback. Production-path runtime tests now
+  cover cancellation, cleanup and late callbacks with no pending request; reused-ID/new-read
+  callback disambiguation remains unproven and is not claimed solved by these tests.
 - [ ] A04 Behaviorally test production mapping/publication/remapping, including the corrected
   central buttons, neutralization and isolation from stale/unbound endpoints.
 - [ ] A05 Unknown devices/layouts fail closed. Strengthen identification/review legacy fallback:

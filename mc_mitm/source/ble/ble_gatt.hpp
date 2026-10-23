@@ -46,13 +46,15 @@ namespace ams::ble::gatt {
     void PrepareDiscovery(const bluetooth::Address &address);
 
     // Completes discovery/MTU work after the bond request, retaining this link's automatic cache records.
-    void Discover(u32 conn_id, const bluetooth::Address &address);
+    Result Discover(u32 conn_id, const bluetooth::Address &address);
 
-    // Set when a cache report arrived after discovery completed, i.e. the stack re-discovered the services
+    // Set when invalid/changing data arrives after local discovery completion. Exact/empty replays
+    // do not set it; the caller must tear down rather than subscribe from a partial replacement table.
     bool TakeRediscovered();
 
-    // Enables notifications on the HID input Report characteristic(s). Fails with InsufficientAuthentication
-    // when the link isn't encrypted; returns NotFound if the table holds no HID service.
+    // Enables notifications only after every input binding has a unique same-service CCCD.
+    // Driver/GATT errors fail setup; an error code alone is not proof of an encryption failure.
+    // Returns NotFound if no unambiguous HID service can be selected.
     Result Subscribe(u32 conn_id, HidService *out);
 
     /*
